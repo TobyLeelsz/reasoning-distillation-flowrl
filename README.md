@@ -2,7 +2,7 @@
 
 FlowRL is a flow-balanced reinforcement learning method that matches full reward distributions instead of maximizing rewards, promoting diverse exploration and generalizable reasoning trajectories in large language models.
 
-![FlowRL Overview](flowrl.pdf)
+![FlowRL Overview](figures/flowrl.png)
 
 ## Quick Start
 
