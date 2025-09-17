@@ -4,8 +4,6 @@ FlowRL is a flow-balanced reinforcement learning method that matches full reward
 
 ![FlowRL Overview](flowrl.pdf)
 
-*FlowRL (left) matches the full reward distribution with low KL divergence (0.11), while traditional reward-maximizing methods like GRPO (right) over-optimize dominant signals with high KL divergence (8.68).*
-
 ## Quick Start
 
 ### Installation
