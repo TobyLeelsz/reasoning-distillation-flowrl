@@ -8,7 +8,7 @@ FlowRL is a flow-balanced reinforcement learning method that matches full reward
 
 ### Installation
 
-The implementation is based on [veRL](https://github.com/volcengine/verl). You must meet all VERL requirements first before using FlowRL.
+Install [veRL](https://github.com/volcengine/verl) first before using FlowRL.
 
 ### Data Preparation
 
@@ -37,13 +37,31 @@ bash preprocess/down_load_model.sh
 ```
 
 ### Training
+
 ```bash
-cd verl@FlowRL/command/training/math
-bash flowrl_7B_math.sh
+cd verl@FlowRL
+
+# For 7B math training
+bash command/training/math/flowrl_7B_math.sh
+
+# For 32B math training
+bash command/training/math/flowrl_32B_math.sh
+
+# For 7B code training
+bash command/training/code/flowrl_7B_code.sh
 ```
 
 ### Testing
+
 ```bash
-cd verl@FlowRL
-python -m pytest tests/
+cd verl@Test
+
+# First merge the model
+bash command/eval/merge_model.sh
+
+# For math testing
+bash command/eval/math/flowrl_math_test.sh
+
+# For code testing
+bash command/eval/code/flowrl_code_test.sh
 ```
