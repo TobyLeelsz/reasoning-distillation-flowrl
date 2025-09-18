@@ -1,21 +1,19 @@
 #!/bin/bash
 
-# export VLLM_ATTENTION_BACKEND=XFORMERS
-
-WORKDIR=/fs-computility/plm/shared/zhuxuekai/reasoning_flow
-PRETRAINED_MODEL=$WORKDIR/pre_trained_model/Llama-3.1-8B-Instruct
+WORKDIR=<YOUR_ABSOLUTE_PATH>
+PRETRAINED_MODEL=$WORKDIR/pre_trained_model/Qwen/Qwen2.5-7B
+n_nodes=1
 n_gpus_per_node=8
+tensor_model_parallel_size=1
 save_freq=50
 
-dapo_train_path=$WORKDIR/data/dapo/dapo-math-17k.parquet
-r1_test_path=$WORKDIR/data/r1_bench_plus/test.parquet
+dapo_train_path=$WORKDIR/data/math_data/dapo-math-17k.parquet
+r1_test_path=$WORKDIR/data/math_data/validation.parquet
 
-experiment_name="gfn_tb_important_sampling_0603"
-
-
+experiment_name="flowrl_qwen_7b_math"
 max_prompt_length=2048
 max_response_length=8192
-tensor_model_parallel_size=1
+OUTPUT_DIR=$WORKDIR/checkpoints/FlowRL/math/7B/$experiment_name
 
 set -x
 
@@ -50,7 +48,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tensor_model_parallel_size \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
@@ -59,8 +57,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name='FlowRL' \
     trainer.experiment_name=$experiment_name \
     trainer.n_gpus_per_node=$n_gpus_per_node \
-    trainer.nnodes=1 \
+    trainer.nnodes=$n_nodes \
     trainer.resume_mode=auto \
     trainer.save_freq=$save_freq \
+    trainer.default_local_dir=$OUTPUT_DIR \
     trainer.test_freq=5 \
     trainer.total_epochs=1 $@

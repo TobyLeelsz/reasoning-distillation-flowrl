@@ -12,17 +12,29 @@ The implementation is based on [veRL](https://github.com/volcengine/verl). You m
 
 ### Data Preparation
 
-Prepare your training data according to your specific task requirements. The data should be formatted and preprocessed appropriately for the FlowRL training pipeline.
+```bash
+# Option 1: Download our pre-processed datasets directly.
+bash preprocess/down_load_dataset.sh
+```
+
+```bash
+# Option 2: Process Data from Source. 
+Process data from original sources. 
+```
+For detailed processing instructions, see [data/README.md](data/README.md).
 
 ### Model Preparation
 
-Download the required pre-trained model using the provided script:
+For Math Tasks: `Qwen/Qwen2.5-7B` (default in script) ; `Qwen/Qwen2.5-32B`
+
+For Code Tasks: `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`
 
 ```bash
-bash data_preprocess/down_load_model.sh
-```
+# Download default model (Qwen2.5-7B for math)
+bash preprocess/down_load_model.sh
 
-This will download the Qwen2.5-7B model to `pre_trained_model/Qwen/Qwen2.5-7B/`.
+# For other models, modify MODEL_NAME in the script before running
+```
 
 ### Training
 ```bash

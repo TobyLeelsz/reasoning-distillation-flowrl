@@ -1,20 +1,19 @@
 #!/bin/bash
 
-WORKDIR=/fs-computility/plm/shared/zhuxuekai/reasoning_flow
+WORKDIR=<YOUR_ABSOLUTE_PATH>
 PRETRAINED_MODEL=$WORKDIR/pre_trained_model/Qwen/Qwen2.5-32B
 n_nodes=4
 n_gpus_per_node=8
+tensor_model_parallel_size=4
 save_freq=50
 
-dapo_train_path=$WORKDIR/data/dapo/dapo-math-17k.parquet
-r1_test_path=$WORKDIR/data/r1_bench_plus/test.parquet
+dapo_train_path=$WORKDIR/data/math_data/dapo-math-17k.parquet
+r1_test_path=$WORKDIR/data/math_data/validation.parquet
 
-experiment_name="gfn_is_qwen_32B_0629"
-
-
+experiment_name="flowrl_qwen_32b_math"
 max_prompt_length=2048
 max_response_length=8192
-tensor_model_parallel_size=4
+OUTPUT_DIR=$WORKDIR/checkpoints/FlowRL/math/32B/$experiment_name
 
 set -x
 
@@ -61,5 +60,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=$n_nodes \
     trainer.resume_mode=auto \
     trainer.save_freq=$save_freq \
+    trainer.default_local_dir=$OUTPUT_DIR \
     trainer.test_freq=5 \
     trainer.total_epochs=1 $@
