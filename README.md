@@ -3,8 +3,11 @@
 </h1>
 
 <p align="center" style="color:#42A5F5; font-size:16px; margin-top:0;">
-  Matching Reward Distributions via Flow Balance |
-  <a href="https://arxiv.org/abs/2509.15207" target="_blank">📄 arXiv Paper</a>
+  Matching Reward Distributions via Flow Balance
+</p>
+<p align="center" style="color:#42A5F5; font-size:15px; margin-top:4px;">
+  <a href="https://arxiv.org/abs/2509.15207" target="_blank">📄 arXiv Paper</a> |
+  <a href="https://huggingface.co/papers/2509.15207" target="_blank">🤗 HF Daily</a>
 </p>
 
 <p align="center">
