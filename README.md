@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center" style="color:#42A5F5; font-size:16px; margin-top:0;">
-  Matching Reward Distributions via <strong>Flow Balance</strong> |
+  Matching Reward Distributions via Flow Balance |
   <a href="https://arxiv.org/abs/2509.15207" target="_blank">📄 arXiv Paper</a>
 </p>
 
