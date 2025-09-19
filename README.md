@@ -3,12 +3,8 @@
 </h1>
 
 <p align="center" style="color:#42A5F5; font-size:16px; margin-top:0;">
-  Matching Reward Distributions via <strong>Flow Balance</strong>
-  |
-  <a href="https://arxiv.org/abs/2509.15207" target="_blank" style="text-decoration: none;">
-    <img src="https://upload.wikimedia.org/wikipedia/commons/9/95/ArXiv_logo.svg" alt="arXiv" height="16" style="vertical-align: text-bottom;"/>
-    Paper
-  </a>
+  Matching Reward Distributions via <strong>Flow Balance</strong> |
+  <a href="https://arxiv.org/abs/2509.15207" target="_blank">📄 arXiv Paper</a>
 </p>
 
 <p align="center">
