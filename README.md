@@ -1,9 +1,8 @@
-<h1 align="center" style="color:#1976D2; font-size:42px; font-weight:bold; margin-bottom:0;">
-  FlowRL
+<h1 align="center">
+  <strong style="color:#1976D2;">FlowRL</strong>
 </h1>
 
-<p align="center" style="color:#42A5F5; font-size:16px; margin-top:0;">
-  Matching Reward Distributions via <strong>Flow Balance</strong>
+<p align="center"><em>Matching Reward Distributions via Flow Balance</em></p>
 </p>
 
 <p align="center">
