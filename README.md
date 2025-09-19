@@ -1,10 +1,16 @@
-# FlowRL: Matching Reward Distributions for LLM Reasoning
+<h1 align="center" style="color:#1976D2; font-size:42px; font-weight:bold; margin-bottom:0;">
+  FlowRL
+</h1>
+
+<p align="center" style="color:#42A5F5; font-size:16px; margin-top:0;">
+  Matching Reward Distributions via <strong>Flow Balance</strong>
+</p>
 
 <p align="center">
   <img src="figures/flowrl.png" alt="FlowRL Overview" width="95%"/>
 </p>
 
-## FlowRL Objective
+## FlowRL Objective:
 
 $$
 \mathcal{L}_{\text{FlowRL}} = w \cdot \left( \log Z_{\phi}(x) + \frac{1}{|y|} \log \pi_{\theta}(y \mid x) - \beta \hat{r}(x, y) - \frac{1}{|y|} \log \pi_{\text{ref}}(y \mid x) \right)^2
