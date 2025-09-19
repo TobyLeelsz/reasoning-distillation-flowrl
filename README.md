@@ -4,10 +4,11 @@
   <img src="figures/flowrl.png" alt="FlowRL Overview" width="95%"/>
 </p>
 
-<p align="center">
-  <strong>FlowRL Objective</strong><br><br>
-  <img src="https://latex.codecogs.com/svg.image?\dpi{110} \mathcal{L}_{\text{FlowRL}} = w \cdot \left( \log Z_{\phi}(x) + \frac{1}{|y|} \log \pi_{\theta}(y|x) - \beta \hat{r}(x,y) - \frac{1}{|y|} \log \pi_{\text{ref}}(y|x) \right)^2" alt="FlowRL Equation"/>
-</p>
+## FlowRL Objective
+
+$$
+\mathcal{L}_{\text{FlowRL}} = w \cdot \left( \log Z_{\phi}(x) + \frac{1}{|y|} \log \pi_{\theta}(y \mid x) - \beta \hat{r}(x, y) - \frac{1}{|y|} \log \pi_{\text{ref}}(y \mid x) \right)^2
+$$
 FlowRL is a flow-balanced reinforcement learning method that matches full reward distributions instead of maximizing rewards, promoting diverse exploration and generalizable reasoning trajectories in large language models.
 
 ## Quick Start
