@@ -1,19 +1,18 @@
 #!/bin/bash
 
-WORKDIR=<YOUR_ABSOLUTE_PATH>
-PRETRAINED_MODEL=$WORKDIR/pre_trained_model/Qwen/Qwen2.5-7B
+PRETRAINED_MODEL=../pre_trained_model/Qwen/Qwen2.5-0.5B
 n_nodes=1
-n_gpus_per_node=8
+n_gpus_per_node=2
 tensor_model_parallel_size=1
 save_freq=50
 
-dapo_train_path=$WORKDIR/data/math_data/dapo-math-17k.parquet
-r1_test_path=$WORKDIR/data/math_data/validation.parquet
+dapo_train_path=../data/math_data/dapo-math-17k.parquet
+r1_test_path=../data/math_data/validation.parquet
 
 experiment_name="flowrl_qwen_7b_math"
 max_prompt_length=2048
 max_response_length=8192
-OUTPUT_DIR=$WORKDIR/checkpoints/FlowRL/math/7B/$experiment_name
+OUTPUT_DIR=../checkpoints/FlowRL/math/7B/$experiment_name
 
 set -x
 
@@ -62,4 +61,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=$save_freq \
     trainer.default_local_dir=$OUTPUT_DIR \
     trainer.test_freq=5 \
-    trainer.total_epochs=1 $@
+    trainer.total_epochs=1 \
+    $@

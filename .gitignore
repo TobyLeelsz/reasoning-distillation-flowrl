@@ -23,3 +23,5 @@ __pycache__/
 data/code_data/
 data/math_data/
 data/xuekai
+
+pre_trained_model/

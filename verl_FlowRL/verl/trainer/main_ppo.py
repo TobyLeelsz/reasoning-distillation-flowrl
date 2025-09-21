@@ -32,7 +32,7 @@ def main(config):
 def run_ppo(config) -> None:
     if not ray.is_initialized():
         ray.init(
-                    address="auto",
+                    # address="auto",
                     runtime_env={
                         "env_vars": {
                             "TOKENIZERS_PARALLELISM": "true",
