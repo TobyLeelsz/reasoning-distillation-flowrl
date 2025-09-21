@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# 使用相对路径，假设从 verl@FlowRL 目录运行
 PRETRAINED_MODEL=../pre_trained_model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
 n_nodes=1
 n_gpus_per_node=8

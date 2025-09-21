@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# 使用相对路径，假设从 verl@FlowRL 目录运行
 PRETRAINED_MODEL=../pre_trained_model/Qwen/Qwen2.5-32B
 n_nodes=4
 n_gpus_per_node=8
