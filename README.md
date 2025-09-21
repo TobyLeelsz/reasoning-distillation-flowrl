@@ -86,3 +86,16 @@ bash command/eval/math/flowrl_math_test.sh
 # For code testing
 bash command/eval/code/flowrl_code_test.sh
 ```
+
+## Citation
+
+If you think this repo helps you, please kindly consider citing our paper:
+
+```bibtex
+@article{zhu2025flowrl,
+  title={FlowRL: Matching Reward Distributions for LLM Reasoning},
+  author={Zhu, Xuekai and Cheng, Daixuan and Zhang, Dinghuai and Li, Hengli and Zhang, Kaiyan and Jiang, Che and Sun, Youbang and Hua, Ermo and Zuo, Yuxin and Lv, Xingtai and others},
+  journal={arXiv preprint arXiv:2509.15207},
+  year={2025}
+}
+```
