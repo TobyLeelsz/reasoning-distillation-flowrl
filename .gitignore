@@ -11,6 +11,8 @@ Thumbs.db
 .vscode/
 verl@FlowRL/.vscode/
 verl@Test/.vscode/
+verl_FlowRL/.vscode/
+verl_Test/.vscode/
 
 # Python
 __pycache__/

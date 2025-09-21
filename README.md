@@ -60,7 +60,7 @@ bash preprocess/down_load_model.sh
 ### Training
 
 ```bash
-cd verl@FlowRL
+cd verl_FlowRL
 
 # For 7B math training
 bash command/training/math/flowrl_7B_math.sh
@@ -75,7 +75,7 @@ bash command/training/code/flowrl_7B_code.sh
 ### Testing
 
 ```bash
-cd verl@Test
+cd verl_Test
 
 # First merge the model
 bash command/eval/merge_model.sh
