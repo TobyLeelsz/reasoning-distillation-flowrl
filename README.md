@@ -33,6 +33,9 @@ Install [veRL](https://github.com/volcengine/verl) first before using FlowRL.
 ```bash
 # Option 1: Download our pre-processed datasets directly.
 bash preprocess/down_load_dataset.sh
+# Move data to default directory
+mv data/xuekai/flowrl-data-collection/math_data data/math_data
+mv data/xuekai/flowrl-data-collection/code_data data/code_data
 ```
 
 ```bash
