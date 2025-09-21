@@ -1,20 +1,20 @@
 #!/bin/bash
 
-WORKDIR=<YOUR_ABSOLUTE_PATH>
-PRETRAINED_MODEL=$WORKDIR/pre_trained_model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+# 使用相对路径，假设从 verl@FlowRL 目录运行
+PRETRAINED_MODEL=../pre_trained_model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
 n_nodes=1
 n_gpus_per_node=8
 tensor_model_parallel_size=2
 save_freq=25
 
-train_files="['$WORKDIR/data/code_data/deepcoder_train-00000-of-00005.parquet','$WORKDIR/data/code_data/deepcoder_train-00001-of-00005.parquet','$WORKDIR/data/code_data/deepcoder_train-00002-of-00005.parquet','$WORKDIR/data/code_data/deepcoder_train-00003-of-00005.parquet','$WORKDIR/data/code_data/deepcoder_train-00004-of-00005.parquet']"
+train_files="['../data/code_data/deepcoder_train-00000-of-00005.parquet','../data/code_data/deepcoder_train-00001-of-00005.parquet','../data/code_data/deepcoder_train-00002-of-00005.parquet','../data/code_data/deepcoder_train-00003-of-00005.parquet','../data/code_data/deepcoder_train-00004-of-00005.parquet']"
 
-test_files="['$WORKDIR/data/code_data/test_livecodebench-00000-of-00005.parquet','$WORKDIR/data/code_data/test_livecodebench-00001-of-00005.parquet','$WORKDIR/data/code_data/test_livecodebench-00002-of-00005.parquet','$WORKDIR/data/code_data/test_livecodebench-00003-of-00005.parquet','$WORKDIR/data/code_data/test_livecodebench-00004-of-00005.parquet']"
+test_files="['../data/code_data/test_livecodebench-00000-of-00005.parquet','../data/code_data/test_livecodebench-00001-of-00005.parquet','../data/code_data/test_livecodebench-00002-of-00005.parquet','../data/code_data/test_livecodebench-00003-of-00005.parquet','../data/code_data/test_livecodebench-00004-of-00005.parquet']"
 
 experiment_name="flowrl_qwen_7b_code"
 max_prompt_length=2048
 max_response_length=$((1024 * 8))
-OUTPUT_DIR=$WORKDIR/checkpoints/FlowRL/code/7B/$experiment_name
+OUTPUT_DIR=../checkpoints/FlowRL/code/7B/$experiment_name
 
 set -x
 
@@ -66,4 +66,5 @@ python3 -m verl.trainer.main_ppo \
     reward_model.reward_manager=naive_code \
     trainer.default_local_dir=$OUTPUT_DIR \
     trainer.test_freq=10 \
-    trainer.total_epochs=20 $@
+    trainer.total_epochs=20 \
+    $@

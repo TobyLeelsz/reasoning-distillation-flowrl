@@ -9,10 +9,10 @@ save_freq=50
 dapo_train_path=../data/math_data/dapo-math-17k.parquet
 r1_test_path=../data/math_data/validation.parquet
 
-experiment_name="flowrl_qwen_7b_math"
+experiment_name="flowrl_qwen_0.5b_math"
 max_prompt_length=2048
 max_response_length=8192
-OUTPUT_DIR=../checkpoints/FlowRL/math/7B/$experiment_name
+OUTPUT_DIR=../checkpoints/FlowRL/math/0.5B/$experiment_name
 
 set -x
 
