@@ -24,7 +24,7 @@ FlowRL is a flow-balanced reinforcement learning method that matches full reward
 
 ## 🚀 Implementation Guide
 
-- ⚙️ If you want implement by yourself, we provide a simple guideline to apply FlowRL in your code: [FlowRL Implementation Guide](https://github.com/Xuekai-Zhu/FlowRL/issues/2#issuecomment-3323035148).
+- ⚙️ If you want to implement by yourself, we provide a simple guideline to apply FlowRL in your code: [FlowRL Implementation Guide](https://github.com/Xuekai-Zhu/FlowRL/issues/2#issuecomment-3323035148).
 
 - 📢 TODO: We are preparing to contribute FlowRL implementation to official repositories [veRL](https://github.com/volcengine/verl)
  and [SLIME](https://github.com/THUDM/slime). Stay tuned.
