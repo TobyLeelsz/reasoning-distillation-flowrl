@@ -22,6 +22,14 @@ $$
 
 FlowRL is a flow-balanced reinforcement learning method that matches full reward distributions instead of maximizing rewards, promoting diverse exploration and generalizable reasoning trajectories in LLMs.
 
+## 🚀 Implementation Guide
+
+- ⚙️ If you want implement by yourself, we provide a simple guideline to apply FlowRL in your code: [FlowRL Implementation Guide](https://github.com/Xuekai-Zhu/FlowRL/issues/2#issuecomment-3323035148).
+
+- 📢 TODO: We are preparing to contribute FlowRL implementation to official repositories [veRL](https://github.com/volcengine/verl)
+ and [SLIME](https://github.com/THUDM/slime). Stay tuned.
+
+
 ## Quick Start
 
 ### Installation
@@ -86,6 +94,7 @@ bash command/eval/math/flowrl_math_test.sh
 # For code testing
 bash command/eval/code/flowrl_code_test.sh
 ```
+
 
 ## Citation
 
