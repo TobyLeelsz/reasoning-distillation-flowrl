@@ -502,10 +502,10 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/tb_loss": avg_loss.detach().item(),
-                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 正向样本超出上限的比例（A>0且r>1+clip）
-                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 正向样本低于下限的比例（A>0且r<1-clip）→ 理论上应该极少出现
-                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 负向样本超出上限的比例（A<0且r>1+clip）→ 你的方法主要影响点
-                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 负向样本低于下限的比例（A<0且r<1-clip）→ PPO正常裁剪区域
+                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), 
+                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
+                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), 
+                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
                         }
                         
         return avg_loss, loss_term_dict
@@ -543,10 +543,10 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/tb_loss": avg_gfn_loss.detach().item(),
                             "actor/ppo_loss": avg_ppo_loss.detach().item(),
                             "actor/final_losses": losses.detach().item(),
-                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 正向样本超出上限的比例（A>0且r>1+clip）
-                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 正向样本低于下限的比例（A>0且r<1-clip）→ 理论上应该极少出现
-                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 负向样本超出上限的比例（A<0且r>1+clip）→ 你的方法主要影响点
-                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 负向样本低于下限的比例（A<0且r<1-clip）→ PPO正常裁剪区域
+                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), 
+                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
+                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(),
+                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
                         }
                         
         return losses, loss_term_dict
@@ -586,10 +586,10 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/tb_loss": avg_loss.detach().item(),
-                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 正向样本超出上限的比例（A>0且r>1+clip）
-                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 正向样本低于下限的比例（A>0且r<1-clip）→ 理论上应该极少出现
-                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), # 负向样本超出上限的比例（A<0且r>1+clip）→ 你的方法主要影响点
-                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), # 负向样本低于下限的比例（A<0且r<1-clip）→ PPO正常裁剪区域
+                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), 
+                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
+                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(),
+                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(),
                         }
                         
         return avg_loss, loss_term_dict
