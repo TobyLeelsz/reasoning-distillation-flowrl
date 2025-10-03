@@ -6,7 +6,7 @@
 
 **File**: `verl/workers/fsdp_workers.py`
 
-[Add this class at line 100](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/fsdp_workers.py#L100):
+[Add this class at line 100](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/fsdp_workers.py#L100):
 
 ```python
 class ProjZModule(torch.nn.Module):
@@ -29,7 +29,7 @@ class ProjZModule(torch.nn.Module):
         return self.net(x)
 ```
 
-[Add this to model building at line 267](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/fsdp_workers.py#L265):
+[Add this to model building at line 267](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/fsdp_workers.py#L265):
 
 ```python
 n_dim = actor_module.config.hidden_size  
@@ -40,13 +40,13 @@ actor_module.proj_z = ProjZModule(n_dim, num_layers=self.config.actor.porj_layer
 
 **File**: `verl/workers/actor/dp_actor.py`
 
-[Change method signature at line 75](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/actor/dp_actor.py#L75):
+[Change method signature at line 75](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/actor/dp_actor.py#L75):
 
 ```python
 def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False,return_log_z=False) -> Tuple[torch.Tensor, torch.Tensor]:
 ```
 
-[Add before return at line 232](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/actor/dp_actor.py#L232):
+[Add before return at line 232](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/actor/dp_actor.py#L232):
 
 ```python
 if return_log_z:
@@ -80,7 +80,7 @@ else:
 
 **File**: `verl/workers/actor/dp_actor.py`
 
-[Replace PPO loss computation around line 412](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/actor/dp_actor.py#L412):
+[Replace PPO loss computation around line 412](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/actor/dp_actor.py#L412):
 
 ```python
 # OLD PPO CODE - REMOVE:
@@ -99,7 +99,7 @@ policy_loss, data = self.compute_flowrl_objective(logpf=log_prob,
                                 clip_ratio=self.config.clip_ratio)
 ```
 
-[Add FlowRL objective function at line 555](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/actor/dp_actor.py#L555):
+[Add FlowRL objective function at line 555](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/actor/dp_actor.py#L555):
 
 ```python
 def compute_flowrl_objective(self, logpf=None, logf_ref=None,  logpf_old=None, log_z=None, reward=None, response_mask=None, clip_ratio=None):
@@ -145,7 +145,7 @@ def compute_flowrl_objective(self, logpf=None, logf_ref=None,  logpf_old=None, l
 
 **File**: `verl/workers/sharding_manager/fsdp_vllm.py`
 
-[Change line 290-293](https://github.com/Xuekai-Zhu/FlowRL/blob/5d4795bddd49d4a7f0d78a742b1c6bcd8bdec581/verl_FlowRL/verl/workers/sharding_manager/fsdp_vllm.py#L290):
+[Change line 290-293](https://github.com/Xuekai-Zhu/FlowRL/blob/4b0b3bee0e85258b7be46481f9a46ffe9e6b5508/verl_FlowRL/verl/workers/sharding_manager/fsdp_vllm.py#L290):
 
 ```python
 # Skip proj_z parameters when loading to vLLM
