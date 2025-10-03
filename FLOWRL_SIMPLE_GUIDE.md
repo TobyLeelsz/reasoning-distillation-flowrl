@@ -52,7 +52,7 @@ def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False
 if return_log_z:
     last_hidden = output.hidden_states[-1].squeeze(0) # (total_nnz, hidden size)
     if self.use_ulysses_sp:
-            last_hidden = gather_outpus_and_unpad(
+            last_hidden = gather_outputs_and_unpad(
                 last_hidden,
                 gather_dim=0,
                 unpad_dim=0,
