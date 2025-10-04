@@ -574,7 +574,7 @@ class DataParallelPPOActor(BasePPOActor):
         importance_weight = torch.exp(log_w).detach() 
         clip_importance_weight = torch.clamp(importance_weight, 1 - clip_ratio, 1 + clip_ratio)
 
-        weighted_losses = importance_weight * (delta ** 2)
+        weighted_losses = clip_importance_weight * (delta ** 2)
         avg_loss = torch.mean(weighted_losses)
         
         # Loss statistics
