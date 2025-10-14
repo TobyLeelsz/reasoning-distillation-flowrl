@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PRETRAINED_MODEL=../pre_trained_model/Qwen/Qwen2.5-7B
+PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/Qwen/Qwen2.5-7B
 n_nodes=1
 n_gpus_per_node=8
 tensor_model_parallel_size=1
@@ -9,7 +9,7 @@ save_freq=50
 dapo_train_path=../data/math_data/dapo-math-17k.parquet
 r1_test_path=../data/math_data/validation.parquet
 
-experiment_name="flowrl_qwen_7b_math"
+experiment_name="flowrl_qwen_7b_math_source_code"
 max_prompt_length=2048
 max_response_length=8192
 OUTPUT_DIR=../checkpoints/FlowRL/math/7B/$experiment_name

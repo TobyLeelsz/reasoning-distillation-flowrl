@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PRETRAINED_MODEL=../pre_trained_model/Qwen/Qwen2.5-0.5B
+PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/Qwen/Qwen2.5-1.5B
 n_nodes=1
 n_gpus_per_node=2
 tensor_model_parallel_size=1
