@@ -2,7 +2,7 @@
 
 PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/Qwen/Qwen2.5-1.5B
 n_nodes=1
-n_gpus_per_node=4
+n_gpus_per_node=8
 tensor_model_parallel_size=1
 save_freq=-1
 
