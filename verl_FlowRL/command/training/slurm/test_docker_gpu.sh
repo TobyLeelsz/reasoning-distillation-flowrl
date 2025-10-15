@@ -16,11 +16,11 @@ echo "Start Time: $(date)"
 echo "=========================================="
 nvidia-smi
 
-# ==== 目录与镜像路径 ====
+
 SIF=/mnt/petrelfs/linzhouhan/xuekaizhu/containers/verl_hiyouga.sif
 WORKDIR=/mnt/petrelfs/linzhouhan/xuekaizhu
 
-# ==== 测试 GPU ====
+
 echo "Launching Apptainer container..."
 apptainer exec --nv \
   --bind ${WORKDIR}:/workspace \
