@@ -8,7 +8,6 @@
 #SBATCH --error=./logs/container_gpu_%j.err
 #SBATCH --time=00:10:00
 
-# 确保日志目录存在
 mkdir -p ./logs
 
 unset ROCR_VISIBLE_DEVICES
@@ -27,7 +26,7 @@ apptainer exec --nv \
   --bind ${WORKDIR}:/workspace \
   "$SIF" \
   bash -c '
-    echo "Inside container:"
+    echo "=== Inside container ==="
     nvidia-smi
     python3 - <<PY
 import torch
