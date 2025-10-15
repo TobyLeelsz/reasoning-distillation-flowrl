@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
-#SBATCH --output=logs/flowrl_%j.out
-#SBATCH --error=logs/flowrl_%j.err
+#SBATCH --output=./logs/flowrl_%j.out
+#SBATCH --error=./logs/flowrl_%j.err
 
 # Unset AMD GPU variable to avoid conflicts with CUDA
 unset ROCR_VISIBLE_DEVICES
@@ -27,5 +27,5 @@ nvidia-smi
 proxy_on
 
 # Run the training script
-cd /mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL
+cd /mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/verl_FlowRL/
 bash command/training/math/flowrl_1.5B_math_test.sh
