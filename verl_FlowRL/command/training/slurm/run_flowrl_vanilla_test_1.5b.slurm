@@ -26,6 +26,13 @@ nvidia-smi
 
 proxy_on
 
+# ===== TRITON =====
+export TRITON_CACHE_DIR=/dev/shm/triton_${SLURM_JOB_ID}_${HOSTNAME}
+export XDG_CACHE_HOME="$TRITON_CACHE_DIR"   # Triton 也会参考这个
+export TMPDIR=/dev/shm/tmp_${SLURM_JOB_ID}_${HOSTNAME}
+mkdir -p "$TRITON_CACHE_DIR" "$TMPDIR"
+# ================================
+
 # Run the training script
 cd /mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/verl_FlowRL/
 bash command/training/math/flowrl_1.5B_math_test.sh
