@@ -20,6 +20,8 @@ echo "CWD: $(pwd)"
 echo "=========================================="
 nvidia-smi || true
 
+proxy_on
+
 # 路径
 SIF=/mnt/petrelfs/linzhouhan/xuekaizhu/containers/verl_hiyouga.sif
 WORKDIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/verl_FlowRL
