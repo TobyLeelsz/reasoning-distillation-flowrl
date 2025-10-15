@@ -26,8 +26,9 @@ nvidia-smi
 
 proxy_on
 
-export TRITON_CACHE_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/triton_cache_flowrl
-mkdir -p $TRITON_CACHE_DIR
+# export TRITON_CACHE_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/triton_cache_flowrl
+export TRITON_CACHE_DIR=""
+# mkdir -p $TRITON_CACHE_DIR
 
 
 # Run the training script
