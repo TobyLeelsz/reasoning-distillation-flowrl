@@ -26,6 +26,9 @@ nvidia-smi
 
 proxy_on
 
+export TRITON_CACHE_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/triton_cache_flowrl
+mkdir -p $TRITON_CACHE_DIR
+
 
 # Run the training script
 bash command/training/math/flowrl_1.5B_math_test.sh
