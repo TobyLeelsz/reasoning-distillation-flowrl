@@ -108,13 +108,13 @@ else:
         newf.__dict__.update(f.__dict__)
         return newf
     def argspec(f):
-        return inspect.getargspec(f)
+        return inspect.getfullargspec(f)
     eval(compile('def _exec(m,g): exec m in g', '<exec>', 'exec'))
 
 def _gettypes(args):
     return tuple(map(type, args))
 
-oargspec =inspect.getfullargspec  #update to fix python3.11
+oargspec = inspect.getfullargspec  # update to fix python3.11
 
 def _argspec(func):
     return __targspec(func, oargspec)
