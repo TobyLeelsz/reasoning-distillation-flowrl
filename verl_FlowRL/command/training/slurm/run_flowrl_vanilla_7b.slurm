@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=plm
-#SBATCH --job-name=xuekai_flowrl_source_code_1013
+#SBATCH --job-name=xuekai_flowrl_source_code_1015
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
@@ -26,6 +26,13 @@ nvidia-smi
 
 proxy_on
 
+# ===== TRITON =====
+export TRITON_CACHE_DIR=/dev/shm/triton_${SLURM_JOB_ID}_${HOSTNAME}
+export XDG_CACHE_HOME="$TRITON_CACHE_DIR"   # Triton 也会参考这个
+export TMPDIR=/dev/shm/tmp_${SLURM_JOB_ID}_${HOSTNAME}
+mkdir -p "$TRITON_CACHE_DIR" "$TMPDIR"
+# ================================
 
 # Run the training script
-bash verl_FlowRL/command/training/math/flowrl_7B_math.sh
+cd /mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/verl_FlowRL/
+bash command/training/math/flowrl_7B_math.sh
