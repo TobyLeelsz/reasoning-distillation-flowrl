@@ -2,17 +2,17 @@
 
 PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/Qwen/Qwen2.5-1.5B
 n_nodes=1
-n_gpus_per_node=2
+n_gpus_per_node=8
 tensor_model_parallel_size=1
 save_freq=50
 
 dapo_train_path=../data/math_data/dapo-math-17k.parquet
 r1_test_path=../data/math_data/validation.parquet
 
-experiment_name="flowrl_qwen_0.5b_math_test"
-max_prompt_length=2048
-max_response_length=8192
-OUTPUT_DIR=../checkpoints/FlowRL/math/0.5B/$experiment_name
+experiment_name="flowrl_qwen_1.5b_math_test"
+max_prompt_length=512
+max_response_length=1024
+OUTPUT_DIR=../checkpoints/FlowRL/math/1.5B/$experiment_name
 
 set -x
 
@@ -20,7 +20,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$dapo_train_path \
     data.val_files=$r1_test_path \
-    data.train_batch_size=512 \
+    data.train_batch_size=64 \
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.truncation='left' \
