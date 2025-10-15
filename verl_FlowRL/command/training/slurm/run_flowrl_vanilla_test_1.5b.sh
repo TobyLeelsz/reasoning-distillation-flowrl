@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=plm
-#SBATCH --job-name=xuekai_flowrl_source_code_test_1013
+#SBATCH --job-name=xuekai_flowrl_source_code_test_1015
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
-#SBATCH --output=./logs/flowrl_%j.out
-#SBATCH --error=./logs/flowrl_%j.err
+#SBATCH --output=logs/flowrl_%j.out
+#SBATCH --error=logs/flowrl_%j.err
 
 # Unset AMD GPU variable to avoid conflicts with CUDA
 unset ROCR_VISIBLE_DEVICES
@@ -26,10 +26,6 @@ nvidia-smi
 
 proxy_on
 
-# export TRITON_CACHE_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/triton_cache_flowrl
-export TRITON_CACHE_DIR=""
-# mkdir -p $TRITON_CACHE_DIR
-
-
 # Run the training script
+cd /mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL
 bash command/training/math/flowrl_1.5B_math_test.sh

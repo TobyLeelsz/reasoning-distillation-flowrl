@@ -2,17 +2,17 @@
 
 PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/Qwen/Qwen2.5-1.5B
 n_nodes=1
-n_gpus_per_node=8
+n_gpus_per_node=4
 tensor_model_parallel_size=1
-save_freq=50
+save_freq=-1
 
-dapo_train_path=../data/math_data/dapo-math-17k.parquet
-r1_test_path=../data/math_data/validation.parquet
+dapo_train_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/dapo-math-17k.parquet
+r1_test_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/validation.parquet
 
 experiment_name="flowrl_qwen_1.5b_math_test"
 max_prompt_length=512
 max_response_length=1024
-OUTPUT_DIR=../checkpoints/FlowRL/math/1.5B/$experiment_name
+OUTPUT_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/checkpoints/FlowRL/math/1.5B/$experiment_name
 
 set -x
 
