@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=256G
-#SBATCH --time=12:00:00
+#SBATCH --time=168:00:00
 #SBATCH --output=./logs/flowrl_%j.out
 #SBATCH --error=./logs/flowrl_%j.err
 
