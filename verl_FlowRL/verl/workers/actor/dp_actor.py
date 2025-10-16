@@ -584,6 +584,10 @@ class DataParallelPPOActor(BasePPOActor):
         # Policy ratio for reference policy (for monitoring distribution shift)
         # ratio_ref = torch.exp(approx_kl_ref)
 
+        # Compute PPO KL and Reference KL for monitoring
+        ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+        ref_kl = verl_F.masked_mean(-approx_kl_ref, response_mask)
+
         loss_term_dict = {
                             "actor/log_prob": verl_F.masked_mean(logpf, response_mask).detach().item(),
                             "actor/old_log_prob": verl_F.masked_mean(logpf_old, response_mask).detach().item(),
@@ -591,12 +595,9 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/final_loss": avg_loss.detach().item(),
-                            "actor/ppo_kl": verl_F.masked_mean(-negative_approx_kl, response_mask).detach().item(),  # PPO-style KL
-                            "actor/ref_kl": verl_F.masked_mean(-approx_kl_ref, response_mask).detach().item(),  # KL with reference policy
-                            # "actor/pos_high_ratio_frac": ((reward > 0) & (ratio_ref > 1 + clip_ratio)).float().detach().mean().item(),
-                            # "actor/pos_low_ratio_frac": ((reward > 0) & (ratio_ref < 1 - clip_ratio)).float().detach().mean().item(),
-                            # "actor/neg_high_ratio_frac": ((reward < 0) & (ratio_ref > 1 + clip_ratio)).float().detach().mean().item(),
-                            # "actor/neg_low_ratio_frac": ((reward < 0) & (ratio_ref < 1 - clip_ratio)).float().detach().mean().item(),
+                            "actor/importance_weight": importance_weight.mean().detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)
+                            "actor/ref_kl": ref_kl.detach().item(),  # KL with reference policy
                         }
                         
         return avg_loss, loss_term_dict
