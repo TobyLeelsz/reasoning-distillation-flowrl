@@ -1,16 +1,16 @@
 #!/bin/bash
 
-PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+PRETRAINED_MODEL=/mnt/hwfile/linzhouhan/xuekaizhu/dev/FlowRL/downloads/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
 n_nodes=1
 n_gpus_per_node=8
 tensor_model_parallel_size=2
-save_freq=25
+save_freq=50
 
 train_files="['/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deepcoder_train-00000-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deepcoder_train-00001-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deepcoder_train-00002-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deepcoder_train-00003-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deepcoder_train-00004-of-00005.parquet']"
 
 test_files="['/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00000-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00001-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00002-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00003-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00004-of-00005.parquet']"
 
-experiment_name="flowrl_qwen_7b_code"
+experiment_name="flowrl_qwen_7b_source_code_1016"
 max_prompt_length=2048
 max_response_length=$((1024 * 8))
 OUTPUT_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/checkpoints/FlowRL/code/7B/$experiment_name
