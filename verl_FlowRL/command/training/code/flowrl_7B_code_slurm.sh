@@ -10,7 +10,7 @@ train_files="['/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/deep
 
 test_files="['/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00000-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00001-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00002-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00003-of-00005.parquet','/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/code_data/test_livecodebench-00004-of-00005.parquet']"
 
-experiment_name="flowrl_qwen_7b_source_code_1016"
+experiment_name="flowrl_qwen_7b_source_code_code_task_1016"
 max_prompt_length=2048
 max_response_length=$((1024 * 8))
 OUTPUT_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/checkpoints/FlowRL/code/7B/$experiment_name
