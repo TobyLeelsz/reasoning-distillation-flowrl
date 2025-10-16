@@ -9,7 +9,7 @@ save_freq=50
 dapo_train_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/dapo-math-17k.parquet
 r1_test_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/validation.parquet
 
-experiment_name="flowrl_qwen_7b_math_source_code"
+experiment_name="flowrl_qwen_7b_math_source_code_1016"
 max_prompt_length=2048
 max_response_length=8192
 OUTPUT_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/checkpoints/FlowRL/math/7B/$experiment_name
