@@ -579,7 +579,7 @@ class DataParallelPPOActor(BasePPOActor):
         # Loss statistics and PPO-style metrics
         # Compute approximate KL divergence between current policy and reference policy
         approx_kl_ref = logpf - logf_ref  # KL(pi_f || pi_ref)
-        approx_kl_old = logpf - logpf_old  # KL(pi_f || pi_old) for policy change tracking
+        negative_approx_kl = logpf - logpf_old  # KL(pi_f || pi_old) for policy change tracking
 
         # Policy ratio for reference policy (for monitoring distribution shift)
         # ratio_ref = torch.exp(approx_kl_ref)
@@ -591,8 +591,8 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/final_loss": avg_loss.detach().item(),
-                            "actor/ppo_kl": verl_F.masked_mean(approx_kl_old, response_mask).detach().item(),  # PPO-style KL
-                            "actor/ref_kl": verl_F.masked_mean(approx_kl_ref, response_mask).detach().item(),  # KL with reference policy
+                            "actor/ppo_kl": verl_F.masked_mean(-negative_approx_kl, response_mask).detach().item(),  # PPO-style KL
+                            "actor/ref_kl": verl_F.masked_mean(-approx_kl_ref, response_mask).detach().item(),  # KL with reference policy
                             # "actor/pos_high_ratio_frac": ((reward > 0) & (ratio_ref > 1 + clip_ratio)).float().detach().mean().item(),
                             # "actor/pos_low_ratio_frac": ((reward > 0) & (ratio_ref < 1 - clip_ratio)).float().detach().mean().item(),
                             # "actor/neg_high_ratio_frac": ((reward < 0) & (ratio_ref > 1 + clip_ratio)).float().detach().mean().item(),
