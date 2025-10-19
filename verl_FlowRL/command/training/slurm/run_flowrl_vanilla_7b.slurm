@@ -24,11 +24,10 @@ mkdir -p "$RAY_TMPDIR"
 # Print GPU info
 nvidia-smi
 
-proxy_on
 
 # ===== TRITON =====
 export TRITON_CACHE_DIR=/dev/shm/triton_${SLURM_JOB_ID}_${HOSTNAME}
-export XDG_CACHE_HOME="$TRITON_CACHE_DIR"   
+export XDG_CACHE_HOME="$TRITON_CACHE_DIR"
 export TMPDIR=/dev/shm/tmp_${SLURM_JOB_ID}_${HOSTNAME}
 mkdir -p "$TRITON_CACHE_DIR" "$TMPDIR"
 # ================================
