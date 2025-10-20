@@ -553,8 +553,7 @@ class DataParallelPPOActor(BasePPOActor):
 
 
     def compute_flowrl_objective(self, logpf=None, logf_ref=None,  logpf_old=None, log_z=None, reward=None, response_mask=None, clip_ratio=None):
-        # we set 𝛽 and 𝛾 to 0.1 and 1.0,
-        # squeeze log_z to (B,)
+
         log_z = log_z.squeeze(-1)
         B = log_z.shape[0]
 
@@ -577,19 +576,28 @@ class DataParallelPPOActor(BasePPOActor):
         weighted_losses = importance_weight * (delta ** 2)
         avg_loss = torch.mean(weighted_losses)
         
-        # Loss statistics
-        negative_approx_kl = logpf - logf_ref
-        ratio = torch.exp(negative_approx_kl)
+        # Loss statistics and PPO-style metrics
+        # Compute approximate KL divergence between current policy and reference policy
+        approx_kl_ref = logpf - logf_ref  # KL(pi_f || pi_ref)
+        negative_approx_kl = logpf - logpf_old  # KL(pi_f || pi_old) for policy change tracking
+
+        # Policy ratio for reference policy (for monitoring distribution shift)
+        # ratio_ref = torch.exp(approx_kl_ref)
+
+        # Compute PPO KL and Reference KL for monitoring
+        ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+        ref_kl = verl_F.masked_mean(-approx_kl_ref, response_mask)
+
         loss_term_dict = {
-                            "actor/logpf": verl_F.masked_mean(logpf, response_mask).detach().item(),
-                            "actor/logp_ref": verl_F.masked_mean(logf_ref, response_mask).detach().item(),
+                            "actor/log_prob": verl_F.masked_mean(logpf, response_mask).detach().item(),
+                            "actor/old_log_prob": verl_F.masked_mean(logpf_old, response_mask).detach().item(),
+                            "actor/ref_log_prob": verl_F.masked_mean(logf_ref, response_mask).detach().item(),
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
-                            "actor/tb_loss": avg_loss.detach().item(),
-                            "actor/pos_high_ratio_frac": ((reward > 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(), 
-                            "actor/pos_low_ratio_frac": ((reward > 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(), 
-                            "actor/neg_high_ratio_frac": ((reward < 0) & (ratio > 1 + clip_ratio)).float().detach().mean().item(),
-                            "actor/neg_low_ratio_frac": ((reward < 0) & (ratio < 1 - clip_ratio)).float().detach().mean().item(),
+                            "actor/final_loss": avg_loss.detach().item(),
+                            "actor/importance_weight": importance_weight.mean().detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)
+                            "actor/ref_kl": ref_kl.detach().item(),  # KL with reference policy
                         }
                         
         return avg_loss, loss_term_dict
