@@ -9,12 +9,12 @@ save_freq=50
 dapo_train_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/dapo-math-17k.parquet
 r1_test_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/validation.parquet
 
-experiment_name="flowrl_qwen_7b_math_v0_1022_clip_max"
+experiment_name="flowrl_qwen_7b_math_v0_1022_no_clip"
 max_prompt_length=2048
 max_response_length=8192
 OUTPUT_DIR=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/checkpoints/FlowRL/math/7B/$experiment_name
 
-export FLOWRL_LOSS_VARIANT="flowrl_clip_max"
+export FLOWRL_LOSS_VARIANT="flowrl_no_is"
 
 set -x
 

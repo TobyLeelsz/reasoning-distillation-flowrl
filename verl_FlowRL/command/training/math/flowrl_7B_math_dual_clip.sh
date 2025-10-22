@@ -4,7 +4,7 @@ PRETRAINED_MODEL=/mnt/petrelfs/linzhouhan/xuekaizhu/verl_FlowRL/downloads/models
 n_nodes=1
 n_gpus_per_node=8
 tensor_model_parallel_size=1
-save_freq=-1
+save_freq=50
 
 dapo_train_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/dapo-math-17k.parquet
 r1_test_path=/mnt/petrelfs/linzhouhan/xuekaizhu/dev/FlowRL/data/math_data/validation.parquet
