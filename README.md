@@ -12,7 +12,8 @@
 <p align="center" style="color:#42A5F5; font-size:14px; margin-top:4px;">
   <a href="https://x.com/RoverHM/status/1969113890878259518" target="_blank">𝕏 Post 1</a> |
   <a href="https://x.com/zdhnarsil/status/1969049940774023428" target="_blank">𝕏 Post 2</a> |
-  <a href="https://x.com/_akhaliq/status/1968901977376505929" target="_blank">𝕏 Post 3</a>
+  <a href="https://x.com/_akhaliq/status/1968901977376505929" target="_blank">𝕏 Post 3</a> |
+  <a href="https://x.com/zhu_xuekai/status/1968942580197941563" target="_blank">𝕏 Post 4</a>
 </p>
 
 <p align="center">
