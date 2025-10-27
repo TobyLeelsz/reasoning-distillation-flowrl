@@ -410,14 +410,42 @@ class DataParallelPPOActor(BasePPOActor):
                     if entropy_coeff != 0:
                         calculate_entropy = True
                     entropy, log_prob, log_z = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, return_log_z=True)
-                
-                    policy_loss, data = self.compute_flowrl_objective(logpf=log_prob, 
-                                                    logf_ref=data['ref_log_prob'],
-                                                    logpf_old=old_log_prob,
-                                                    log_z=log_z,
-                                                    reward=advantages,
-                                                    response_mask=response_mask,
-                                                    clip_ratio=self.config.clip_ratio)
+
+                    loss_variant = os.getenv("FLOWRL_LOSS_VARIANT", "vanilla")
+
+                    if loss_variant == "vanilla":
+                        policy_loss, data = self.compute_flowrl_objective(logpf=log_prob, 
+                                                        logf_ref=data['ref_log_prob'],
+                                                        logpf_old=old_log_prob,
+                                                        log_z=log_z,
+                                                        reward=advantages,
+                                                        response_mask=response_mask,
+                                                        clip_ratio=self.config.clip_ratio)
+                    elif loss_variant == "flowrl_clip_max":
+                        policy_loss, data = self.compute_flowrl_clip_max(logpf=log_prob, 
+                                                        logf_ref=data['ref_log_prob'],
+                                                        logpf_old=old_log_prob,
+                                                        log_z=log_z,
+                                                        reward=advantages,
+                                                        response_mask=response_mask,
+                                                        clip_ratio=self.config.clip_ratio)
+                    elif loss_variant == "flowrl_dual_clip":
+                        policy_loss, data = self.compute_flowrl_dual_clip(logpf=log_prob, 
+                                                        logf_ref=data['ref_log_prob'],
+                                                        logpf_old=old_log_prob,
+                                                        log_z=log_z,
+                                                        reward=advantages,
+                                                        response_mask=response_mask,
+                                                        clip_ratio=self.config.clip_ratio)
+                    elif loss_variant == "flowrl_no_is":
+                        policy_loss, data = self.compute_flowrl_no_is(logpf=log_prob, 
+                                                        logf_ref=data['ref_log_prob'],
+                                                        logpf_old=old_log_prob,
+                                                        log_z=log_z,
+                                                        reward=advantages,
+                                                        response_mask=response_mask,
+                                                        clip_ratio=self.config.clip_ratio)
+
                     # pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                     #     old_log_prob=old_log_prob,
                     #     log_prob=log_prob,
@@ -570,10 +598,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         # important sampling
         log_w = verl_F.masked_sum(logpf - logpf_old, response_mask, axis=1)  # sum over valid tokens per trajectory
-        importance_weight = torch.exp(log_w).detach() 
-        clip_importance_weight = torch.clamp(importance_weight, 1 - clip_ratio, 1 + clip_ratio)
+        imp_w_raw = torch.exp(log_w).detach() 
+        imp_w = torch.clamp(imp_w_raw, max=10)
 
-        weighted_losses = importance_weight * (delta ** 2)
+        weighted_losses = imp_w * (delta ** 2)
         avg_loss = torch.mean(weighted_losses)
         
         # Loss statistics and PPO-style metrics
