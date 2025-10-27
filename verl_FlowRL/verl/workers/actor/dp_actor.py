@@ -623,8 +623,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/final_loss": avg_loss.detach().item(),
-                            "actor/importance_weight_raw": imp_w_raw.mean().detach().item(),
-                            "actor/importance_weight": imp_w.mean().detach().item(),
+                            "actor/importance_weight": importance_weight.mean().detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)
                             "actor/ref_kl": ref_kl.detach().item(),  # KL with reference policy
                         }
