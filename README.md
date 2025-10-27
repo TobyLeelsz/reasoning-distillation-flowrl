@@ -60,6 +60,8 @@ There are three ways to use FlowRL:
 
 For running FlowRL using the verl framework:
 
+**Latest verl:** For the latest verl integration, see [PR #3924](https://github.com/volcengine/verl/pull/3924)
+
 #### Step 1: Prepare Data and Model
 
 ```bash
