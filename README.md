@@ -61,7 +61,9 @@ There are three ways to use FlowRL:
 
 For running FlowRL using the verl framework:
 
-**Latest verl:** For the latest verl integration, see [PR #3924](https://github.com/volcengine/verl/pull/3924)
+**Latest verl:**
+- verl recipe: [https://github.com/volcengine/verl/tree/main/recipe/flowrl](https://github.com/volcengine/verl/tree/main/recipe/flowrl)
+- fp16 infer: [PR #4036](https://github.com/volcengine/verl/pull/4036)
 
 #### Step 1: Prepare Data and Model
 
