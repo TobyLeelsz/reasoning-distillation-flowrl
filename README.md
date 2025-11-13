@@ -33,8 +33,8 @@
     - [Step 2: Data Preparation](#step-2-data-preparation)
     - [Step 3: Model Preparation](#step-3-model-preparation)
     - [Step 4: Training Scripts](#step-4-training-scripts)
-    - [Step 5: Testing](#step-5-testing)
   - [Option 3: Implement FlowRL Yourself](#option-3-implement-flowrl-yourself)
+- [Testing](#testing)
 - [Citation](#citation)
 
 ## FlowRL Objective
@@ -135,7 +135,17 @@ bash command/training/math/flowrl_32B_math.sh
 bash command/training/code/flowrl_7B_code.sh
 ```
 
-#### Step 5: Testing
+### Option 3: Implement FlowRL Yourself
+
+If you want to implement FlowRL in your own codebase, we provide a detailed implementation guide:
+
+📖 **[FlowRL Implementation Guide](FLOWRL_SIMPLE_GUIDE.md)**
+
+This guide walks you through the key components and steps needed to integrate FlowRL into your existing training pipeline.
+
+## Testing
+
+After training your FlowRL models, you can evaluate them using the following commands:
 
 ```bash
 cd verl_Test
@@ -149,14 +159,6 @@ bash command/eval/math/flowrl_math_test.sh
 # For code testing
 bash command/eval/code/flowrl_code_test.sh
 ```
-
-### Option 3: Implement FlowRL Yourself
-
-If you want to implement FlowRL in your own codebase, we provide a detailed implementation guide:
-
-📖 **[FlowRL Implementation Guide](FLOWRL_SIMPLE_GUIDE.md)**
-
-This guide walks you through the key components and steps needed to integrate FlowRL into your existing training pipeline.
 
 ## Citation
 
