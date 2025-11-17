@@ -25,15 +25,16 @@
 - [FlowRL Objective](#flowrl-objective)
 - [Trained Models & Experiment Logs](#trained-models--experiment-logs)
 - [Quick Start](#quick-start)
-  - [Option 1: Use verl Recipe](#option-1-use-verl-recipe)
-    - [Step 1: Prepare Data and Model](#step-1-prepare-data-and-model)
-    - [Step 2: Run Training](#step-2-run-training)
-  - [Option 2: Original Paper Reproduction](#option-2-original-paper-reproduction)
+  - [Option 1: Original Paper Reproduction (verl 0.4.0) ⭐ Recommended](#option-1-original-paper-reproduction-verl-040--recommended)
     - [Step 1: Installation](#step-1-installation)
     - [Step 2: Data Preparation](#step-2-data-preparation)
     - [Step 3: Model Preparation](#step-3-model-preparation)
     - [Step 4: Training Scripts](#step-4-training-scripts)
-  - [Option 3: Implement FlowRL Yourself](#option-3-implement-flowrl-yourself)
+  - [Option 2: FlowRL with verl v0.5.0.dev](#option-2-flowrl-with-verl-v050dev)
+  - [Option 3: Latest verl Recipe FlowRL](#option-3-latest-verl-recipe-flowrl)
+    - [Step 1: Prepare Data and Model](#step-1-prepare-data-and-model)
+    - [Step 2: Run Training](#step-2-run-training)
+  - [Option 4: Implement FlowRL Yourself](#option-4-implement-flowrl-yourself)
 - [Testing](#testing)
 - [Citation](#citation)
 
@@ -55,36 +56,11 @@ FlowRL is a flow-balanced reinforcement learning method that matches full reward
 
 ## Quick Start
 
-There are three ways to use FlowRL:
+There are four ways to use FlowRL:
 
-### Option 1: Use verl Recipe
+### Option 1: Original Paper Reproduction (verl 0.4.0) ⭐ Recommended
 
-For running FlowRL using the verl framework:
-
-**Latest verl:**
-- verl recipe: [https://github.com/volcengine/verl/tree/main/recipe/flowrl](https://github.com/volcengine/verl/tree/main/recipe/flowrl)
-- fp16 infer: [PR #4036](https://github.com/volcengine/verl/pull/4036)
-
-#### Step 1: Prepare Data and Model
-
-```bash
-# Prepare dataset
-bash recipe/flowrl/prepare/prepare_data.sh
-
-# Prepare model
-bash recipe/flowrl/prepare/prepare_model.sh
-```
-
-#### Step 2: Run Training
-
-```bash
-# Train FlowRL with Qwen2.5-7B
-bash recipe/flowrl/run_flowrl_qwen2.5_7b.sh
-```
-
-### Option 2: Original Paper Reproduction
-
-For exact reproduction of results from the paper, use the original repository:
+For exact reproduction of results from the paper, use the original repository with verl 0.4.0:
 
 👉 **Original Code:** [https://github.com/Xuekai-Zhu/FlowRL](https://github.com/Xuekai-Zhu/FlowRL)
 
@@ -135,7 +111,39 @@ bash command/training/math/flowrl_32B_math.sh
 bash command/training/code/flowrl_7B_code.sh
 ```
 
-### Option 3: Implement FlowRL Yourself
+### Option 2: FlowRL with verl v0.5.0.dev
+
+For running FlowRL using verl v0.5.0.dev:
+
+👉 **verl v0.5.0.dev Recipe:** [run_flowrl_cispo_clip_qwen2.5_7b.sh](https://github.com/Xuekai-Zhu/verl_FlowRL/blob/flowrl-v0.5.0.dev/recipe/flowrl/run_flowrl_cispo_clip_qwen2.5_7b.sh)
+
+### Option 3: Latest verl Recipe FlowRL
+
+For running FlowRL using the latest verl framework:
+
+**Latest verl:**
+
+- verl recipe: [https://github.com/volcengine/verl/tree/main/recipe/flowrl](https://github.com/volcengine/verl/tree/main/recipe/flowrl)
+- fp16 infer: [PR #4036](https://github.com/volcengine/verl/pull/4036)
+
+#### Step 1: Prepare Data and Model
+
+```bash
+# Prepare dataset
+bash recipe/flowrl/prepare/prepare_data.sh
+
+# Prepare model
+bash recipe/flowrl/prepare/prepare_model.sh
+```
+
+#### Step 2: Run Training
+
+```bash
+# Train FlowRL with Qwen2.5-7B
+bash recipe/flowrl/run_flowrl_qwen2.5_7b.sh
+```
+
+### Option 4: Implement FlowRL Yourself
 
 If you want to implement FlowRL in your own codebase, we provide a detailed implementation guide:
 
@@ -159,6 +167,8 @@ bash command/eval/math/flowrl_math_test.sh
 # For code testing
 bash command/eval/code/flowrl_code_test.sh
 ```
+
+**Reference:** For verl v0.5.0.dev merge model script, see [merge_model.sh](https://github.com/Xuekai-Zhu/verl_FlowRL/blob/flowrl-v0.5.0.dev/recipe/flowrl/eval/merge_model.sh)
 
 ## Citation
 
