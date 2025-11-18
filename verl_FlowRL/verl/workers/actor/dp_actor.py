@@ -411,40 +411,16 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy = True
                     entropy, log_prob, log_z = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, return_log_z=True)
 
-                    loss_variant = os.getenv("FLOWRL_LOSS_VARIANT", "vanilla")
-
-                    if loss_variant == "vanilla":
-                        policy_loss, data = self.compute_flowrl_objective(logpf=log_prob, 
-                                                        logf_ref=data['ref_log_prob'],
-                                                        logpf_old=old_log_prob,
-                                                        log_z=log_z,
-                                                        reward=advantages,
-                                                        response_mask=response_mask,
-                                                        clip_ratio=self.config.clip_ratio)
-                    elif loss_variant == "flowrl_clip_max":
-                        policy_loss, data = self.compute_flowrl_clip_max(logpf=log_prob, 
-                                                        logf_ref=data['ref_log_prob'],
-                                                        logpf_old=old_log_prob,
-                                                        log_z=log_z,
-                                                        reward=advantages,
-                                                        response_mask=response_mask,
-                                                        clip_ratio=self.config.clip_ratio)
-                    elif loss_variant == "flowrl_dual_clip":
-                        policy_loss, data = self.compute_flowrl_dual_clip(logpf=log_prob, 
-                                                        logf_ref=data['ref_log_prob'],
-                                                        logpf_old=old_log_prob,
-                                                        log_z=log_z,
-                                                        reward=advantages,
-                                                        response_mask=response_mask,
-                                                        clip_ratio=self.config.clip_ratio)
-                    elif loss_variant == "flowrl_no_is":
-                        policy_loss, data = self.compute_flowrl_no_is(logpf=log_prob, 
-                                                        logf_ref=data['ref_log_prob'],
-                                                        logpf_old=old_log_prob,
-                                                        log_z=log_z,
-                                                        reward=advantages,
-                                                        response_mask=response_mask,
-                                                        clip_ratio=self.config.clip_ratio)
+                    # Compute FlowRL objective
+                    policy_loss, data = self.compute_flowrl_objective(
+                        logpf=log_prob,
+                        logf_ref=data['ref_log_prob'],
+                        logpf_old=old_log_prob,
+                        log_z=log_z,
+                        reward=advantages,
+                        response_mask=response_mask,
+                        clip_ratio=self.config.clip_ratio
+                    )
 
                     # pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                     #     old_log_prob=old_log_prob,
@@ -623,7 +599,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
                             "actor/final_loss": avg_loss.detach().item(),
-                            "actor/importance_weight": importance_weight.mean().detach().item(),
+                            "actor/importance_weight": imp_w.mean().detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)
                             "actor/ref_kl": ref_kl.detach().item(),  # KL with reference policy
                         }
