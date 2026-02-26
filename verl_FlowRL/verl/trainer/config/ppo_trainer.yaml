@@ -252,7 +252,7 @@ custom_reward_function:
     trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     use_fast_tokenizer: True
     max_seq_len: null
-    normalize_by_length: False # group-level length normalization is applied in ray_trainer
+    normalize_by_length: True
     clear_cuda_cache: False
 
 algorithm:

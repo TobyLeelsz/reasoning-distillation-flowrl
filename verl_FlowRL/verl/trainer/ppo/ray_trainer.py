@@ -212,63 +212,6 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def normalize_outcome_scores_by_group_total_length(
-    token_level_scores: torch.Tensor,
-    response_mask: torch.Tensor,
-    index: np.ndarray,
-    reward_is_per_token_mean: bool = False,
-    epsilon: float = 1e-6,
-):
-    """Normalize outcome scores by total response length per group.
-
-    For each sample i in group g:
-        score_i := (sum_t score_{i,t}) / (sum_{j in g} |o_j|)
-    where |o_j| is the valid response length from ``response_mask``.
-
-    Args:
-        token_level_scores: (bs, response_length) reward tensor (outcome-style).
-        response_mask: (bs, response_length) mask used to measure valid lengths.
-        index: (bs,) group id per sample.
-        reward_is_per_token_mean: whether incoming scalar reward already contains
-            per-sample length normalization (i.e., divided by |o_i|). If True, we
-            first recover summed reward by multiplying with |o_i|.
-        epsilon: lower bound for denominator to avoid division by zero.
-    Returns:
-        A tuple of:
-            - normalized token-level scores (outcome style, only last valid token non-zero)
-            - normalized scalar sequence scores
-            - per-sample denominators (group total lengths)
-    """
-    bsz = token_level_scores.shape[0]
-    if bsz != len(index):
-        raise ValueError(f"Batch size mismatch: {bsz=} != {len(index)=}")
-
-    seq_lens_long = response_mask.sum(dim=-1).to(torch.long).clamp_min(1)
-    seq_lens = seq_lens_long.to(token_level_scores.dtype)
-
-    seq_scores = token_level_scores.sum(dim=-1)
-    if reward_is_per_token_mean:
-        seq_scores = seq_scores * seq_lens
-
-    id2total_len = defaultdict(float)
-    for i in range(bsz):
-        id2total_len[index[i]] += float(seq_lens[i].item())
-
-    denom = torch.tensor(
-        [id2total_len[index[i]] for i in range(bsz)],
-        device=token_level_scores.device,
-        dtype=token_level_scores.dtype,
-    ).clamp_min(epsilon)
-
-    normalized_seq_scores = seq_scores / denom
-
-    normalized_token_scores = torch.zeros_like(token_level_scores)
-    batch_idx = torch.arange(bsz, device=token_level_scores.device)
-    normalized_token_scores[batch_idx, seq_lens_long - 1] = normalized_seq_scores.to(token_level_scores.dtype)
-
-    return normalized_token_scores, normalized_seq_scores, denom
-
-
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, **kwargs):
     """Compute advantage estimates for policy optimization.
 
@@ -1233,34 +1176,6 @@ class RayPPOTrainer:
                             reward_results = ray.get(future_reward)
                             reward_tensor, reward_extra_infos_dict = self._merge_async_reward_results(reward_results)
                         batch.batch["token_level_scores"] = reward_tensor
-
-                        if "log_ratio" in reward_extra_infos_dict and "uid" in batch.non_tensor_batch:
-                            # Apply group-level length normalization:
-                            #   1 / (sum_i |o_i|) * sum_i sum_t(...)
-                            # by scaling each sample in the same group with the shared
-                            # denominator sum_i |o_i|. This is done on the full merged
-                            # batch so it is consistent even with async reward workers.
-                            group_norm_mask = batch.batch["response_mask"]
-                            if self.config.actor_rollout_ref.rollout.multi_turn.enable and "loss_mask" in batch.batch:
-                                response_length = group_norm_mask.size(1)
-                                group_norm_mask = batch.batch["loss_mask"][:, -response_length:]
-
-                            reward_kwargs = self.config.custom_reward_function.get("reward_kwargs", {})
-                            reward_is_per_token_mean = bool(reward_kwargs.get("normalize_by_length", False))
-
-                            (
-                                batch.batch["token_level_scores"],
-                                normalized_seq_scores,
-                                group_norm_denom,
-                            ) = normalize_outcome_scores_by_group_total_length(
-                                token_level_scores=batch.batch["token_level_scores"],
-                                response_mask=group_norm_mask,
-                                index=batch.non_tensor_batch["uid"],
-                                reward_is_per_token_mean=reward_is_per_token_mean,
-                            )
-
-                            metrics["reward/log_ratio_group_total_response_len_mean"] = float(group_norm_denom.mean().item())
-                            metrics["reward/log_ratio_after_group_len_norm_mean"] = float(normalized_seq_scores.mean().item())
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:

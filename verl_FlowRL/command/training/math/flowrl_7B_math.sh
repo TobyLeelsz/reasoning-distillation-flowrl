@@ -381,7 +381,6 @@ case "$REWARD_MODE" in
       custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
       custom_reward_function.reward_kwargs.offload_folder=$RM_OFFLOAD_FOLDER
       custom_reward_function.reward_kwargs.max_gpu_memory=$RM_MAX_GPU_MEMORY
-      custom_reward_function.reward_kwargs.normalize_by_length=False
     )
     ;;
   *)
