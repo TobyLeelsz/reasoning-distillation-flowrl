@@ -16,6 +16,8 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import os
+import time
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -51,12 +53,53 @@ class Tracking:
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=config)
-            self.logger["wandb"] = wandb
+            init_timeout = float(os.environ.get("VERL_WANDB_INIT_TIMEOUT", "120"))
+            init_retries = max(1, int(os.environ.get("VERL_WANDB_INIT_RETRIES", "3")))
+            retry_sleep_s = max(0.0, float(os.environ.get("VERL_WANDB_RETRY_SLEEP", "15")))
+            wandb_mode = os.environ.get("WANDB_MODE", None)
+            disable_on_error = os.environ.get("VERL_WANDB_DISABLE_ON_ERROR", "1") == "1"
+            fallback_console = os.environ.get("VERL_WANDB_FALLBACK_CONSOLE", "1") == "1"
+
+            wandb_init_kwargs = {
+                "project": project_name,
+                "name": experiment_name,
+                "config": config,
+                "settings": wandb.Settings(init_timeout=init_timeout),
+            }
+            if wandb_mode:
+                wandb_init_kwargs["mode"] = wandb_mode
+
+            last_error = None
+            for attempt in range(1, init_retries + 1):
+                try:
+                    wandb.init(**wandb_init_kwargs)
+                    self.logger["wandb"] = wandb
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < init_retries:
+                        print(
+                            f"[Tracking] wandb init attempt {attempt}/{init_retries} failed "
+                            f"({type(e).__name__}: {e}). Retrying in {retry_sleep_s}s..."
+                        )
+                        if retry_sleep_s > 0:
+                            time.sleep(retry_sleep_s)
+
+            if last_error is not None:
+                if not disable_on_error:
+                    raise last_error
+                print(
+                    f"[Tracking] wandb init failed after {init_retries} attempts "
+                    f"({type(last_error).__name__}: {last_error}). Continue without wandb."
+                )
+                if fallback_console and "console" not in self.logger:
+                    from verl.utils.logger.aggregate_logger import LocalLogger
+
+                    self.console_logger = LocalLogger(print_to_console=True)
+                    self.logger["console"] = self.console_logger
 
         if "mlflow" in default_backend:
-            import os
-
             import mlflow
 
             MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", None)
@@ -71,8 +114,6 @@ class Tracking:
             self.logger["mlflow"] = _MlflowLoggingAdapter()
 
         if "swanlab" in default_backend:
-            import os
-
             import swanlab
 
             SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
@@ -93,8 +134,6 @@ class Tracking:
             self.logger["swanlab"] = swanlab
 
         if "vemlp_wandb" in default_backend:
-            import os
-
             import volcengine_ml_platform
             from volcengine_ml_platform import wandb as vemlp_wandb
 

@@ -38,7 +38,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.hdfs_io import makedirs
 from verl.utils.model import compute_position_id_with_mask
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
-from verl.utils.device import is_cuda_available
+from verl.utils.device import is_cuda_available, is_npu_available
 
 
 @hydra.main(config_path="config", config_name="generation", version_base=None)
@@ -81,8 +81,34 @@ def main_task(config):
         tokenizer.pad_token = tokenizer.eos_token
 
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(ActorRolloutRefWorker), config=config, role="rollout")
-    resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name="cuda" if is_cuda_available else "npu")
+
+    # Prefer explicit override, then infer from Ray cluster resources.
+    device_name = str(config.trainer.get("device_name", "")).lower()
+    if device_name not in {"cuda", "npu", "cpu"}:
+        cluster_res = ray.cluster_resources()
+        if cluster_res.get("GPU", 0.0) >= 1:
+            device_name = "cuda"
+        elif cluster_res.get("NPU", 0.0) >= 1:
+            device_name = "npu"
+        elif is_cuda_available:
+            device_name = "cuda"
+        elif is_npu_available:
+            device_name = "npu"
+        else:
+            device_name = "cpu"
+
+    use_accelerator = device_name in {"cuda", "npu"}
+    if config.trainer.n_gpus_per_node > 0 and not use_accelerator:
+        raise RuntimeError(
+            "trainer.n_gpus_per_node > 0 but no GPU/NPU resources were detected. "
+            "Set trainer.device_name=cuda when GPUs are available, or set trainer.n_gpus_per_node=0 for CPU."
+        )
+
+    resource_pool = RayResourcePool(
+        process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        use_gpu=use_accelerator,
+    )
+    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=device_name)
     wg.init_model()
 
     total_samples = len(dataset)

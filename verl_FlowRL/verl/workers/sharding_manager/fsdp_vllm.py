@@ -48,6 +48,90 @@ from .base import BaseShardingManager
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_NCCL_FALLBACK_WARNED = False
+
+
+
+def _is_nccl_coalesced_allgather_unsupported(err: RuntimeError) -> bool:
+    msg = str(err)
+    return "Backend nccl does not support allgather_into_tensor_coalesced" in msg
+
+
+def _pad_to_shape(tensor: torch.Tensor, target_shape: tuple[int, ...]) -> torch.Tensor:
+    if tuple(tensor.shape) == target_shape:
+        return tensor
+
+    pad = []
+    for dim in reversed(range(tensor.dim())):
+        delta = int(target_shape[dim]) - int(tensor.shape[dim])
+        if delta < 0:
+            raise RuntimeError(f"Cannot pad dim {dim}: tensor shape {tuple(tensor.shape)} > target {target_shape}")
+        pad.extend([0, delta])
+    return torch.nn.functional.pad(tensor, pad)
+
+
+def _dtensor_to_full_tensor_safe(param: DTensor, device: torch.device) -> torch.Tensor:
+    """
+    Convert DTensor to full tensor for vLLM loading.
+
+    On some torch+nccl combinations, DTensor.full_tensor() can fail with
+    unsupported `allgather_into_tensor_coalesced`. We fallback to a manual
+    all_gather reconstruction for Shard placements.
+    """
+    dt = param.to(device, non_blocking=True)
+    try:
+        return dt.full_tensor()
+    except RuntimeError as e:
+        if not _is_nccl_coalesced_allgather_unsupported(e):
+            raise
+
+        if not torch.distributed.is_initialized():
+            raise
+
+        local = dt.to_local().contiguous()
+
+        shard_dim = None
+        for placement in getattr(dt, "placements", ()):
+            if hasattr(placement, "dim"):
+                shard_dim = int(placement.dim)
+                break
+
+        if shard_dim is None:
+            logger.warning("DTensor full_tensor() failed; using local tensor fallback.")
+            return local
+
+        world_size = torch.distributed.get_world_size()
+
+        local_shape = torch.tensor(list(local.shape), device=local.device, dtype=torch.long)
+        gathered_shape_tensors = [torch.empty_like(local_shape) for _ in range(world_size)]
+        torch.distributed.all_gather(gathered_shape_tensors, local_shape)
+        gathered_shapes = [tuple(int(x) for x in shape_tensor.tolist()) for shape_tensor in gathered_shape_tensors]
+
+        ndim = len(gathered_shapes[0])
+        if any(len(shape) != ndim for shape in gathered_shapes):
+            raise RuntimeError(f"Inconsistent DTensor local ranks shapes: {gathered_shapes}")
+
+        max_shape = tuple(max(shape[d] for shape in gathered_shapes) for d in range(ndim))
+        local_padded = _pad_to_shape(local, max_shape).contiguous()
+
+        gathered = [torch.empty(max_shape, dtype=local.dtype, device=local.device) for _ in range(world_size)]
+        torch.distributed.all_gather(gathered, local_padded)
+
+        gathered_unpadded = []
+        for gathered_shard, shape in zip(gathered, gathered_shapes):
+            shard_slices = tuple(slice(0, s) for s in shape)
+            gathered_unpadded.append(gathered_shard[shard_slices])
+        full = torch.cat(gathered_unpadded, dim=shard_dim)
+
+        # Trim potential pad introduced by equal-size sharding.
+        target_shape = tuple(int(s) for s in dt.shape)
+        slices = tuple(slice(0, s) for s in target_shape)
+        full = full[slices]
+        global _NCCL_FALLBACK_WARNED
+        if not _NCCL_FALLBACK_WARNED:
+            logger.warning("DTensor full_tensor() failed; using shape-safe manual all_gather fallback.")
+            _NCCL_FALLBACK_WARNED = True
+        return full
 
 
 class FSDPVLLMShardingManager(BaseShardingManager):
@@ -287,7 +371,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         patch_vllm_moe_model_weight_loader(model)
         device = get_torch_device().current_device()  # used when fsdp2 set cpu_offload_policy
         # loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
-        loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+        loaded_params = model.load_weights(((name, _dtensor_to_full_tensor_safe(param, device) if isinstance(param, DTensor) else param)
                                             for name, param in updated_params.items()
                                             if not name.startswith("proj_z"))
                                             )

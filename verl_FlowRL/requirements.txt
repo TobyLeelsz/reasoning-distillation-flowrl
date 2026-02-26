@@ -24,7 +24,7 @@ py-spy
 
 # GPU acceleration (optional)
 liger-kernel
-flash-attn
+# flash-attn
 
 # Math verification (for FlowRL math training)
 math-verify

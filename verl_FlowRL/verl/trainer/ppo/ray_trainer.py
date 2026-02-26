@@ -51,7 +51,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     process_validation_metrics,
 )
-from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.reward import AsyncRewardWorker, compute_reward
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
@@ -210,6 +210,63 @@ def compute_response_mask(data: DataProto):
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
+
+
+def normalize_outcome_scores_by_group_total_length(
+    token_level_scores: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    reward_is_per_token_mean: bool = False,
+    epsilon: float = 1e-6,
+):
+    """Normalize outcome scores by total response length per group.
+
+    For each sample i in group g:
+        score_i := (sum_t score_{i,t}) / (sum_{j in g} |o_j|)
+    where |o_j| is the valid response length from ``response_mask``.
+
+    Args:
+        token_level_scores: (bs, response_length) reward tensor (outcome-style).
+        response_mask: (bs, response_length) mask used to measure valid lengths.
+        index: (bs,) group id per sample.
+        reward_is_per_token_mean: whether incoming scalar reward already contains
+            per-sample length normalization (i.e., divided by |o_i|). If True, we
+            first recover summed reward by multiplying with |o_i|.
+        epsilon: lower bound for denominator to avoid division by zero.
+    Returns:
+        A tuple of:
+            - normalized token-level scores (outcome style, only last valid token non-zero)
+            - normalized scalar sequence scores
+            - per-sample denominators (group total lengths)
+    """
+    bsz = token_level_scores.shape[0]
+    if bsz != len(index):
+        raise ValueError(f"Batch size mismatch: {bsz=} != {len(index)=}")
+
+    seq_lens_long = response_mask.sum(dim=-1).to(torch.long).clamp_min(1)
+    seq_lens = seq_lens_long.to(token_level_scores.dtype)
+
+    seq_scores = token_level_scores.sum(dim=-1)
+    if reward_is_per_token_mean:
+        seq_scores = seq_scores * seq_lens
+
+    id2total_len = defaultdict(float)
+    for i in range(bsz):
+        id2total_len[index[i]] += float(seq_lens[i].item())
+
+    denom = torch.tensor(
+        [id2total_len[index[i]] for i in range(bsz)],
+        device=token_level_scores.device,
+        dtype=token_level_scores.dtype,
+    ).clamp_min(epsilon)
+
+    normalized_seq_scores = seq_scores / denom
+
+    normalized_token_scores = torch.zeros_like(token_level_scores)
+    batch_idx = torch.arange(bsz, device=token_level_scores.device)
+    normalized_token_scores[batch_idx, seq_lens_long - 1] = normalized_seq_scores.to(token_level_scores.dtype)
+
+    return normalized_token_scores, normalized_seq_scores, denom
 
 
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, **kwargs):
@@ -379,6 +436,8 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self._reward_async_workers = []
+        self._reward_async_num_workers = 0
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
@@ -528,7 +587,12 @@ class RayPPOTrainer:
         if train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
         if val_dataset is None:
-            val_dataset = create_rl_dataset(self.config.data.val_files, self.config.data, self.tokenizer, self.processor)
+            val_data_config = deepcopy(self.config.data)
+            with open_dict(val_data_config):
+                # Keep rollout/training prompt formatting, but preserve original prompts for evaluation.
+                val_data_config.system_prompt = None
+                val_data_config.user_prompt_template = None
+            val_dataset = create_rl_dataset(self.config.data.val_files, val_data_config, self.tokenizer, self.processor)
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
         if train_sampler is None:
@@ -699,15 +763,13 @@ class RayPPOTrainer:
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
+            reward_tensor, reward_extra_info = compute_reward(test_batch, self.val_reward_fn)
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
+            for key, lst in reward_extra_info.items():
+                reward_extra_infos_dict[key].extend(lst)
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
@@ -924,6 +986,70 @@ class RayPPOTrainer:
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
+    def _init_async_reward_workers(self):
+        if not self.config.reward_model.launch_reward_fn_async:
+            return
+        if self._reward_async_workers:
+            return
+
+        reward_async_num_workers = int(self.config.reward_model.get("reward_fn_async_num_workers", 1))
+        reward_async_num_workers = max(1, reward_async_num_workers)
+        reward_async_num_cpus = float(self.config.reward_model.get("reward_fn_async_num_cpus", 1))
+        reward_async_num_gpus = float(self.config.reward_model.get("reward_fn_async_num_gpus", 0))
+
+        for _ in range(reward_async_num_workers):
+            worker = AsyncRewardWorker.options(
+                num_cpus=reward_async_num_cpus,
+                num_gpus=reward_async_num_gpus,
+            ).remote(self.config, self.tokenizer)
+            self._reward_async_workers.append(worker)
+
+        self._reward_async_num_workers = len(self._reward_async_workers)
+        print(
+            "[async_reward] initialized "
+            f"{self._reward_async_num_workers} worker(s), "
+            f"num_gpus_per_worker={reward_async_num_gpus}, num_cpus_per_worker={reward_async_num_cpus}"
+        )
+        warmup_enabled = bool(self.config.reward_model.get("reward_fn_async_warmup", True))
+        if warmup_enabled:
+            warmup_timeout_s = float(self.config.reward_model.get("reward_fn_async_warmup_timeout_s", 600))
+            print(f"[async_reward] warmup start (timeout={warmup_timeout_s}s)")
+            warmup_refs = [worker.warmup.remote() for worker in self._reward_async_workers]
+            if warmup_timeout_s > 0:
+                ready, not_ready = ray.wait(warmup_refs, num_returns=len(warmup_refs), timeout=warmup_timeout_s)
+                if not_ready:
+                    raise RuntimeError(
+                        "Async reward worker warmup timed out. This usually means reward GPUs are not schedulable "
+                        f"(e.g., visible GPU count too small or all GPUs already reserved). "
+                        f"ray.cluster_resources={ray.cluster_resources()} ray.available_resources={ray.available_resources()}"
+                    )
+                warmup_results = ray.get(ready)
+            else:
+                warmup_results = ray.get(warmup_refs)
+            print(f"[async_reward] warmup done: {warmup_results}")
+
+    def _split_batch_for_async_reward(self, batch: DataProto, num_chunks: int) -> list[DataProto]:
+        if num_chunks <= 1 or len(batch) <= 1:
+            return [batch]
+
+        split_indices = np.array_split(np.arange(len(batch)), num_chunks)
+        sub_batches = []
+        for idx in split_indices:
+            if len(idx) == 0:
+                continue
+            sub_batches.append(batch.select_idxs(idx.astype(np.int64)))
+        return sub_batches if sub_batches else [batch]
+
+    @staticmethod
+    def _merge_async_reward_results(reward_results):
+        reward_tensors = []
+        reward_extra_infos_dict = defaultdict(list)
+        for reward_tensor, reward_extra_infos in reward_results:
+            reward_tensors.append(reward_tensor)
+            for key, values in reward_extra_infos.items():
+                reward_extra_infos_dict[key].extend(values)
+        return torch.cat(reward_tensors, dim=0), reward_extra_infos_dict
+
     def fit(self):
         """
         The training loop of PPO.
@@ -946,6 +1072,10 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+
+        # initialize async reward workers before validation, so resource issues fail fast
+        # and custom RM is materialized on dedicated reward GPUs instead of delaying until training.
+        self._init_async_reward_workers()
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -1003,7 +1133,7 @@ class RayPPOTrainer:
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
+                            reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -1034,7 +1164,14 @@ class RayPPOTrainer:
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                            if not self._reward_async_workers:
+                                self._init_async_reward_workers()
+
+                            reward_sub_batches = self._split_batch_for_async_reward(batch, self._reward_async_num_workers)
+                            future_reward = []
+                            for idx, sub_batch in enumerate(reward_sub_batches):
+                                worker = self._reward_async_workers[idx % self._reward_async_num_workers]
+                                future_reward.append(worker.compute.remote(sub_batch))
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
@@ -1093,12 +1230,56 @@ class RayPPOTrainer:
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            reward_results = ray.get(future_reward)
+                            reward_tensor, reward_extra_infos_dict = self._merge_async_reward_results(reward_results)
                         batch.batch["token_level_scores"] = reward_tensor
+
+                        if "log_ratio" in reward_extra_infos_dict and "uid" in batch.non_tensor_batch:
+                            # Apply group-level length normalization:
+                            #   1 / (sum_i |o_i|) * sum_i sum_t(...)
+                            # by scaling each sample in the same group with the shared
+                            # denominator sum_i |o_i|. This is done on the full merged
+                            # batch so it is consistent even with async reward workers.
+                            group_norm_mask = batch.batch["response_mask"]
+                            if self.config.actor_rollout_ref.rollout.multi_turn.enable and "loss_mask" in batch.batch:
+                                response_length = group_norm_mask.size(1)
+                                group_norm_mask = batch.batch["loss_mask"][:, -response_length:]
+
+                            reward_kwargs = self.config.custom_reward_function.get("reward_kwargs", {})
+                            reward_is_per_token_mean = bool(reward_kwargs.get("normalize_by_length", False))
+
+                            (
+                                batch.batch["token_level_scores"],
+                                normalized_seq_scores,
+                                group_norm_denom,
+                            ) = normalize_outcome_scores_by_group_total_length(
+                                token_level_scores=batch.batch["token_level_scores"],
+                                response_mask=group_norm_mask,
+                                index=batch.non_tensor_batch["uid"],
+                                reward_is_per_token_mean=reward_is_per_token_mean,
+                            )
+
+                            metrics["reward/log_ratio_group_total_response_len_mean"] = float(group_norm_denom.mean().item())
+                            metrics["reward/log_ratio_after_group_len_norm_mean"] = float(normalized_seq_scores.mean().item())
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+                            log_ratio_values = reward_extra_infos_dict.get("log_ratio_mean")
+                            if log_ratio_values is None:
+                                log_ratio_values = reward_extra_infos_dict.get("log_ratio")
+                            if log_ratio_values is not None:
+                                valid_log_ratio_values = []
+                                for value in log_ratio_values:
+                                    try:
+                                        value = float(value)
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if np.isfinite(value):
+                                        valid_log_ratio_values.append(value)
+                                if valid_log_ratio_values:
+                                    metrics["reward/log_ratio/mean"] = float(np.mean(valid_log_ratio_values))
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

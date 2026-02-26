@@ -31,17 +31,23 @@ def main(config):
 
 def run_ppo(config) -> None:
     if not ray.is_initialized():
+        runtime_env_vars = {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "WARN",
+            "VLLM_LOGGING_LEVEL": "WARN",
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
+        }
+        # Do not hardcode proxy settings. Inherit only when explicitly set in
+        # the launcher environment.
+        for key in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"]:
+            value = os.environ.get(key)
+            if value:
+                runtime_env_vars[key] = value
+
         ray.init(
                     # address="auto",
                     runtime_env={
-                        "env_vars": {
-                            "TOKENIZERS_PARALLELISM": "true",
-                            "NCCL_DEBUG": "WARN",
-                            "VLLM_LOGGING_LEVEL": "WARN",
-                            "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
-                            "http_proxy": "http://100.68.170.107:3128",
-                            "https_proxy": "http://100.68.170.107:3128"
-                        }
+                        "env_vars": runtime_env_vars
                         },
                 )
 
@@ -59,9 +65,10 @@ def run_ppo(config) -> None:
 class TaskRunner:
     def run(self, config):
         # print initial config
+        from copy import deepcopy
         from pprint import pprint
 
-        from omegaconf import OmegaConf
+        from omegaconf import OmegaConf, open_dict
 
         from verl.utils.fs import copy_to_local
 
@@ -144,13 +151,27 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        val_reward_config = config
+        if config.reward_model.get("use_rule_reward_for_eval", False):
+            val_reward_config = deepcopy(config)
+            with open_dict(val_reward_config):
+                val_reward_config.reward_model.reward_manager = "naive"
+                val_reward_config.custom_reward_function.path = None
+            print("[INFO] Validation reward forced to rule-based (naive reward manager).")
+        val_reward_fn = load_reward_manager(val_reward_config, tokenizer, num_examine=1, **val_reward_config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_data_config = deepcopy(config.data)
+        val_data_config = deepcopy(config.data)
+        with open_dict(val_data_config):
+            # Keep rollout/training prompt formatting, but preserve original prompts for evaluation.
+            val_data_config.system_prompt = None
+            val_data_config.user_prompt_template = None
+
+        train_dataset = create_rl_dataset(config.data.train_files, train_data_config, tokenizer, processor)
+        val_dataset = create_rl_dataset(config.data.val_files, val_data_config, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
         trainer = RayPPOTrainer(
             config=config,

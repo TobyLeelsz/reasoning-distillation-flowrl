@@ -33,6 +33,43 @@ from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+DEFAULT_USER_PROMPT_TEMPLATE = (
+    "Solve the following math problem step by step. The last line of your response "
+    "should be of the form Answer: $Answer (without quotes) where $Answer is the "
+    "answer to the problem.\n\n"
+    "{problem}\n\n"
+    'Remember to put your answer on its own line after "Answer:".'
+)
+_TEMPLATE_PREFIX = "Solve the following math problem step by step."
+_TEMPLATE_SUFFIX = 'Remember to put your answer on its own line after "Answer:".'
+
+
+def _normalize_flowrl_messages(messages, system_prompt: Optional[str], user_prompt_template: Optional[str]) -> list:
+    if not isinstance(messages, list):
+        messages = [{"role": "user", "content": str(messages)}]
+    else:
+        messages = copy.deepcopy(messages)
+
+    if system_prompt:
+        if len(messages) > 0 and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+            messages[0]["content"] = system_prompt
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+
+    if user_prompt_template:
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            if _TEMPLATE_PREFIX in content and _TEMPLATE_SUFFIX in content:
+                continue
+            msg["content"] = user_prompt_template.format(problem=content)
+
+    return messages
+
 
 def collate_fn(data_list: list[dict]) -> dict:
     """
@@ -114,6 +151,8 @@ class RLHFDataset(Dataset):
         self.chat_template_func = config.get("chat_template_func", None)
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
+        self.system_prompt = config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        self.user_prompt_template = config.get("user_prompt_template", DEFAULT_USER_PROMPT_TEMPLATE)
         self.serialize_dataset = False
         self._download()
         self._read_files_and_tokenize()
@@ -139,8 +178,16 @@ class RLHFDataset(Dataset):
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
+            system_prompt = self.system_prompt
+            user_prompt_template = self.user_prompt_template
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                lambda doc: len(
+                    tokenizer.apply_chat_template(
+                        _normalize_flowrl_messages(doc[prompt_key], system_prompt, user_prompt_template),
+                        add_generation_prompt=True,
+                    )
+                )
+                <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
@@ -160,7 +207,11 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        messages: list = _normalize_flowrl_messages(
+            example.pop(self.prompt_key),
+            self.system_prompt,
+            self.user_prompt_template,
+        )
 
         if self.image_key in example or self.video_key in example:
             for message in messages:

@@ -16,6 +16,13 @@ data:
   filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You cat set the filter_overlong_prompts_workers to use multiprocessing to speed up.
   filter_overlong_prompts_workers: 1
   truncation: error
+  system_prompt: "You are a helpful assistant."
+  user_prompt_template: |-
+    Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.
+
+    {problem}
+
+    Remember to put your answer on its own line after "Answer:".
   image_key: images
   video_key: videos
   trust_remote_code: False  # main_ppo will check this config to determine whether to use remote code for tokenizer
@@ -217,14 +224,36 @@ reward_model:
   ulysses_sequence_parallel_size: 1 # sp size
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
+  reward_manager: batch
+  use_rule_reward_for_eval: False
   launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
+  reward_fn_async_num_workers: 1
+  reward_fn_async_num_cpus: 1
+  reward_fn_async_num_gpus: 0 # per async reward worker
+  reward_fn_async_warmup: True
+  reward_fn_async_warmup_timeout_s: 600
   sandbox_fusion:
     url: null # faas url to run code in cloud sandbox
     max_concurrent: 64 # max concurrent requests to sandbox
 custom_reward_function:
-  path: null
+  path: /workspace/verl_FlowRL/verl/trainer/ppo/log_ratio_reward.py
   name: compute_score
+  reward_kwargs:
+    policy_model_path: /workspace/checkpoints/checkpoint-800
+    reference_model_path: ${actor_rollout_ref.model.path}
+    tokenizer_path: ${actor_rollout_ref.model.path}
+    beta: 2.0 # 0.001
+    micro_batch_size: 1
+    device_map: auto
+    torch_dtype: bfloat16
+    offload_folder: /tmp/verl_reward_offload
+    max_gpu_memory: 2GiB
+    max_cpu_memory: null
+    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
+    use_fast_tokenizer: True
+    max_seq_len: null
+    normalize_by_length: False # group-level length normalization is applied in ray_trainer
+    clear_cuda_cache: False
 
 algorithm:
   gamma: 1.0

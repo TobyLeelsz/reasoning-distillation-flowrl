@@ -248,7 +248,17 @@ class DataParallelPPOActor(BasePPOActor):
                 avg_hidden = verl_F.masked_mean(prompts_last_hidden, prompt_attention_mask.unsqueeze(-1), axis=1)
 
                 # avg_hidden = avg_hidden.detach()  # use detach() to stop gradient of proj_z to policy
-                log_z = self.actor_module.proj_z(avg_hidden) 
+                proj_z = self.actor_module.proj_z
+                # Defensive alignment: proj_z may be excluded from FSDP sharding and end up
+                # on a different device than the actor hidden states.
+                proj_z_param = next(proj_z.parameters(), None)
+                if proj_z_param is not None:
+                    if proj_z_param.device != avg_hidden.device:
+                        proj_z.to(device=avg_hidden.device)
+                        proj_z_param = next(proj_z.parameters(), None)
+                    if proj_z_param is not None and avg_hidden.dtype != proj_z_param.dtype:
+                        avg_hidden = avg_hidden.to(dtype=proj_z_param.dtype)
+                log_z = proj_z(avg_hidden)
 
                 return entropy, log_probs, log_z
                 

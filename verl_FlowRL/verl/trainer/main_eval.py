@@ -18,6 +18,7 @@ The input is a parquet file that contains N generated sequences and (optional) t
 """
 
 from collections import defaultdict
+import math
 
 import hydra
 import numpy as np
@@ -26,14 +27,61 @@ import ray
 from tqdm import tqdm
 
 from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.utils.reward_score import default_compute_score
 from verl.utils.fs import copy_to_local
 
 
+def _score_to_float(score):
+    if isinstance(score, dict):
+        if "score" in score:
+            return float(score["score"])
+        if "acc" in score:
+            return float(score["acc"])
+        raise ValueError(f"Unsupported score dict format: {score.keys()}")
+    return float(score)
+
+
+def _score_is_correct(score, threshold=0.0):
+    if isinstance(score, dict):
+        if "acc" in score:
+            return bool(score["acc"])
+        if "correct" in score:
+            return bool(score["correct"])
+    return _score_to_float(score) > threshold
+
+
+def _pass_at_k(num_samples, num_correct, k):
+    if num_samples <= 0:
+        return 0.0
+    k = max(1, min(int(k), int(num_samples)))
+    num_correct = int(num_correct)
+    if num_correct <= 0:
+        return 0.0
+    if num_samples - num_correct < k:
+        return 1.0
+    return 1.0 - (math.comb(num_samples - num_correct, k) / math.comb(num_samples, k))
+
+
 @ray.remote
-def process_item(reward_fn, data_source, response_lst, reward_data):
+def process_item(config, data_source, response_lst, reward_data):
+    reward_fn = get_custom_reward_fn(config) or default_compute_score
     ground_truth = reward_data["ground_truth"]
-    score_lst = [reward_fn(data_source, r, ground_truth) for r in response_lst]
-    return data_source, np.mean(score_lst)
+    raw_scores = [reward_fn(data_source, r, ground_truth) for r in response_lst]
+
+    eval_cfg = config.get("eval", {})
+    metric_name = str(eval_cfg.get("metric", "mean")).lower()
+    pass_at_k = int(eval_cfg.get("pass_at_k", eval_cfg.get("k", 4)))
+    pass_threshold = float(eval_cfg.get("pass_threshold", 0.0))
+
+    if metric_name in {"pass", "pass_at_k", "pass@k", "passk"}:
+        num_correct = sum(_score_is_correct(score, threshold=pass_threshold) for score in raw_scores)
+        metric = _pass_at_k(num_samples=len(raw_scores), num_correct=num_correct, k=pass_at_k)
+    elif metric_name in {"max", "best"}:
+        metric = max(_score_to_float(score) for score in raw_scores)
+    else:
+        metric = float(np.mean([_score_to_float(score) for score in raw_scores]))
+
+    return data_source, metric
 
 
 @hydra.main(config_path="config", config_name="evaluation", version_base=None)
@@ -52,10 +100,19 @@ def main(config):
 
     # evaluate test_score based on data source
     data_source_reward = defaultdict(list)
-    compute_score = get_custom_reward_fn(config)
+
+    eval_cfg = config.get("eval", {})
+    metric_name = str(eval_cfg.get("metric", "mean")).lower()
+    pass_at_k = int(eval_cfg.get("pass_at_k", eval_cfg.get("k", 4)))
+    if metric_name in {"pass", "pass_at_k", "pass@k", "passk"}:
+        metric_prefix = f"test_pass@{pass_at_k}"
+    elif metric_name in {"max", "best"}:
+        metric_prefix = "test_best"
+    else:
+        metric_prefix = "test_score"
 
     # Create remote tasks
-    remote_tasks = [process_item.remote(compute_score, data_sources[i], responses[i], reward_model_data[i]) for i in range(total)]
+    remote_tasks = [process_item.remote(config, data_sources[i], responses[i], reward_model_data[i]) for i in range(total)]
 
     # Process results as they come in
     with tqdm(total=total) as pbar:
@@ -69,7 +126,7 @@ def main(config):
 
     metric_dict = {}
     for data_source, rewards in data_source_reward.items():
-        metric_dict[f"test_score/{data_source}"] = np.mean(rewards)
+        metric_dict[f"{metric_prefix}/{data_source}"] = np.mean(rewards)
 
     print(metric_dict)
 

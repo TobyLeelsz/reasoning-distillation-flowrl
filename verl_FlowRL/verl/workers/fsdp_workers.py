@@ -262,9 +262,32 @@ class ActorRolloutRefWorker(Worker):
                 trust_remote_code=trust_remote_code,
             )
 
-            n_dim = actor_module.config.hidden_size  
-            # actor_module.proj_z = torch.nn.Linear(n_dim, 1)
-            actor_module.proj_z = ProjZModule(n_dim, num_layers=self.config.actor.porj_layer)
+            n_dim = actor_module.config.hidden_size
+            # Keep backward compatibility with existing configs that use the
+            # misspelled key `porj_layer`, while allowing `proj_layer` and a safe default.
+            proj_layers = self.config.actor.get("porj_layer", self.config.actor.get("proj_layer", 3))
+            actor_module.proj_z = ProjZModule(n_dim, num_layers=proj_layers)
+            # If model init uses meta tensors, newly attached modules can keep invalid
+            # (non-materialized) storage. Ensure proj_z has real storage before FSDP wrap.
+            proj_z_params = list(actor_module.proj_z.parameters())
+            target_device = torch.device("cpu")
+            if role == "actor":
+                # proj_z is used explicitly in dp_actor.update_policy; keep it on actor compute
+                # device to avoid cross-device matmul in log_z forward.
+                target_device = torch.device(f"{device_name}:{get_torch_device().current_device()}")
+            else:
+                for p in actor_module.parameters():
+                    if not getattr(p, "is_meta", False):
+                        target_device = p.device
+                        break
+
+            if any(getattr(p, "is_meta", False) for p in proj_z_params) or any(p.untyped_storage().size() == 0 for p in proj_z_params):
+                actor_module.proj_z = actor_module.proj_z.to_empty(device=target_device)
+                for m in actor_module.proj_z.modules():
+                    if hasattr(m, "reset_parameters"):
+                        m.reset_parameters()
+            else:
+                actor_module.proj_z = actor_module.proj_z.to(device=target_device)
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -333,19 +356,43 @@ class ActorRolloutRefWorker(Worker):
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
         fsdp_strategy = self.config.actor.strategy
         if fsdp_strategy == "fsdp":
-            actor_module_fsdp = FSDP(
-                actor_module,
-                cpu_offload=cpu_offload,
-                param_init_fn=init_fn,
-                use_orig_params=False,
-                auto_wrap_policy=auto_wrap_policy,
-                device_id=get_torch_device().current_device(),
-                sharding_strategy=sharding_strategy,  # zero3
-                mixed_precision=mixed_precision,
-                sync_module_states=True,
-                device_mesh=self.device_mesh,
-                forward_prefetch=False,
-            )
+            fsdp_extra_kwargs = {}
+            # proj_z is called directly in dp_actor (outside actor_module(...)), so it must
+            # stay unsharded to avoid zero-storage parameter views on some ranks.
+            if hasattr(actor_module, "proj_z") and actor_module.proj_z is not None:
+                fsdp_extra_kwargs["ignored_modules"] = [actor_module.proj_z]
+            try:
+                actor_module_fsdp = FSDP(
+                    actor_module,
+                    cpu_offload=cpu_offload,
+                    param_init_fn=init_fn,
+                    use_orig_params=False,
+                    auto_wrap_policy=auto_wrap_policy,
+                    device_id=get_torch_device().current_device(),
+                    sharding_strategy=sharding_strategy,  # zero3
+                    mixed_precision=mixed_precision,
+                    sync_module_states=True,
+                    device_mesh=self.device_mesh,
+                    forward_prefetch=False,
+                    **fsdp_extra_kwargs,
+                )
+            except TypeError as e:
+                if "ignored_modules" not in str(e):
+                    raise
+                logger.warning("FSDP ignored_modules is unsupported; fallback without ignored_modules for proj_z.")
+                actor_module_fsdp = FSDP(
+                    actor_module,
+                    cpu_offload=cpu_offload,
+                    param_init_fn=init_fn,
+                    use_orig_params=False,
+                    auto_wrap_policy=auto_wrap_policy,
+                    device_id=get_torch_device().current_device(),
+                    sharding_strategy=sharding_strategy,  # zero3
+                    mixed_precision=mixed_precision,
+                    sync_module_states=True,
+                    device_mesh=self.device_mesh,
+                    forward_prefetch=False,
+                )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True)
