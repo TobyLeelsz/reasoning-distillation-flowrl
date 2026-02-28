@@ -487,26 +487,17 @@ class DataParallelPPOActor(BasePPOActor):
     def compute_flowrl_objective(self, logpf=None, logf_ref=None,  logpf_old=None, log_z=None, reward=None, response_mask=None, clip_ratio=None):
 
         log_z = log_z.squeeze(-1)
-        B = log_z.shape[0]
-
-        # mean of log p_f / log p_ref over valid tokens
-        avg_logpf = verl_F.masked_mean(logpf, response_mask, axis=1)
-        avg_logp_ref = verl_F.masked_mean(logf_ref, response_mask, axis=1)
-
-        # mean of token-level reward → log
-        # we set R = exp(advantage); then log_reward = advantage
-        seq_log_reward = verl_F.masked_mean(reward, response_mask, axis=1) 
-        
-        # TB loss residual
-        delta = log_z + avg_logpf - 15 * seq_log_reward - avg_logp_ref
+        # Token-level FlowRL residual with outside-length normalization:
+        #   loss = 1 / sum_i |o_i| * sum_i sum_t w_i * delta_{i,t}^2
+        token_delta = log_z.unsqueeze(-1) + logpf - 30 * reward - logf_ref
 
         # important sampling
         log_w = verl_F.masked_sum(logpf - logpf_old, response_mask, axis=1)  # sum over valid tokens per trajectory
         imp_w_raw = torch.exp(log_w).detach() 
         imp_w = torch.clamp(imp_w_raw, max=10)
 
-        weighted_losses = imp_w * (delta ** 2)
-        avg_loss = torch.mean(weighted_losses)
+        weighted_token_losses = imp_w.unsqueeze(-1) * (token_delta ** 2)
+        avg_loss = verl_F.masked_mean(weighted_token_losses, response_mask)
         
         # Loss statistics and PPO-style metrics
         # Compute approximate KL divergence between current policy and reference policy
@@ -526,6 +517,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/ref_log_prob": verl_F.masked_mean(logf_ref, response_mask).detach().item(),
                             "actor/log_z": log_z.mean().detach().item(),
                             "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
+                            "actor/token_delta": verl_F.masked_mean(token_delta, response_mask).detach().item(),
                             "actor/final_loss": avg_loss.detach().item(),
                             "actor/importance_weight": imp_w.mean().detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)

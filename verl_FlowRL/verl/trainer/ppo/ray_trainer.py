@@ -264,6 +264,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            adv_clip_min_before_normalization=kwargs.get("adv_clip_min_before_normalization", None),
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1218,7 +1219,16 @@ class RayPPOTrainer:
                             use_pf_ppo=self.config.algorithm.use_pf_ppo,
                             pf_ppo_reweight_method=self.config.algorithm.pf_ppo.reweight_method,
                             pf_ppo_weight_pow=self.config.algorithm.pf_ppo.weight_pow,
+                            adv_clip_min_before_normalization=self.config.algorithm.get("adv_clip_min_before_normalization", None),
                         )
+
+                        if "log_ratio" in reward_extra_infos_dict:
+                            # Keep estimator-produced advantages for FlowRL.
+                            # For GRPO this is sequence-level normalization
+                            # ((A - mean) / std) broadcast to response tokens.
+                            metrics["reward/sequence_level_advantage_mean"] = float(
+                                masked_mean(batch.batch["advantages"], batch.batch["response_mask"]).item()
+                            )
 
                     # update critic
                     if self.use_critic:

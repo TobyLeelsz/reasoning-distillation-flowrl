@@ -79,16 +79,26 @@ class BatchRewardManager:
         for i in range(len(data)):
             length = valid_response_lengths[i].item()
             score = scores[i]
+            token_scores = None
 
             if isinstance(score, dict):
                 reward = score["score"]
                 for key, value in score.items():
+                    if key == "token_scores":
+                        token_scores = value
+                        continue
                     reward_extra_info[key].append(value)
             else:
                 reward = score
 
             rewards.append(reward)
-            reward_tensor[i, length - 1] = reward
+            if token_scores is not None:
+                token_scores_tensor = torch.as_tensor(token_scores, dtype=reward_tensor.dtype, device=reward_tensor.device)
+                valid_len = min(length, token_scores_tensor.numel())
+                if valid_len > 0:
+                    reward_tensor[i, :valid_len] = token_scores_tensor[:valid_len]
+            else:
+                reward_tensor[i, length - 1] = reward
 
             data_source = data_sources[i]
             if already_printed.get(data_source, 0) < self.num_examine:

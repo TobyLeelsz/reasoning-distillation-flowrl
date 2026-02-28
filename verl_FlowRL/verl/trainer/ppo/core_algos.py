@@ -116,6 +116,7 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: str = True,
+    adv_clip_min_before_normalization: float | None = None,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -156,10 +157,13 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            centered_adv = scores[i] - id2mean[index[i]]
+            if adv_clip_min_before_normalization is not None:
+                centered_adv = torch.clamp(centered_adv, min=float(adv_clip_min_before_normalization))
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                scores[i] = centered_adv / (id2std[index[i]] + epsilon)
             else:
-                scores[i] = scores[i] - id2mean[index[i]]
+                scores[i] = centered_adv
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores

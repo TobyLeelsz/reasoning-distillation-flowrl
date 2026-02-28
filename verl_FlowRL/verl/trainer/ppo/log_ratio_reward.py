@@ -53,8 +53,7 @@ def _to_dtype(dtype_name: str) -> torch.dtype:
     return mapping[key]
 
 
-def _sequence_logprob_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Mirror chi_squared_rm.py sequence logprob computation."""
+def _token_logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     logits = logits[:, :-1, :]
     labels = labels[:, 1:]
 
@@ -63,6 +62,12 @@ def _sequence_logprob_from_logits(logits: torch.Tensor, labels: torch.Tensor) ->
 
     log_probs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
     per_token_logps = log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+    return per_token_logps, loss_mask
+
+
+def _sequence_logprob_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Mirror chi_squared_rm.py sequence logprob computation."""
+    per_token_logps, loss_mask = _token_logprobs_from_logits(logits, labels)
     loss_mask = loss_mask.to(per_token_logps.dtype)
     return (per_token_logps * loss_mask).sum(-1)
 
@@ -117,6 +122,7 @@ class LogRatioRewardScorer:
         attn_implementation: str,
         max_seq_len: Optional[int],
         normalize_by_length: bool,
+        reward_clip_min: Optional[float],
         clear_cuda_cache: bool,
     ):
         from transformers import AutoTokenizer
@@ -133,6 +139,7 @@ class LogRatioRewardScorer:
         # Align with chi/test script default max length when config does not override it.
         self.max_seq_len = int(max_seq_len) if max_seq_len is not None else _DEFAULT_MAX_SEQ_LEN
         self.normalize_by_length = bool(normalize_by_length)
+        self.reward_clip_min = None if reward_clip_min is None else float(reward_clip_min)
         self.clear_cuda_cache = bool(clear_cuda_cache)
 
         if self.device_map in {"auto", "cuda"} and not torch.cuda.is_available():
@@ -262,8 +269,9 @@ class LogRatioRewardScorer:
 
         return input_ids, attention_mask, label_ids, response_lens_tensor
 
-    def _sequence_log_probs(self, model, input_ids: torch.Tensor, attention_mask: torch.Tensor, label_ids: torch.Tensor) -> torch.Tensor:
+    def _sequence_log_probs(self, model, input_ids: torch.Tensor, attention_mask: torch.Tensor, label_ids: torch.Tensor) -> tuple[torch.Tensor, list[list[float]]]:
         all_logps = []
+        all_token_logps = []
         has_hf_device_map = hasattr(model, "hf_device_map")
         model_device = torch.device("cpu")
         if not has_hf_device_map:
@@ -295,17 +303,22 @@ class LogRatioRewardScorer:
                     raise
                 if mb_label_ids.device != logits.device:
                     mb_label_ids = mb_label_ids.to(logits.device, non_blocking=True)
-                seq_logps = _sequence_logprob_from_logits(logits, mb_label_ids)
+                per_token_logps, loss_mask = _token_logprobs_from_logits(logits, mb_label_ids)
+                seq_logps = (per_token_logps * loss_mask.to(per_token_logps.dtype)).sum(-1)
                 all_logps.append(seq_logps.detach().cpu())
+                per_token_logps_cpu = per_token_logps.detach().cpu()
+                loss_mask_cpu = loss_mask.detach().cpu()
+                for row_logps, row_mask in zip(per_token_logps_cpu, loss_mask_cpu):
+                    all_token_logps.append(row_logps[row_mask].tolist())
 
-                del logits, seq_logps
+                del logits, seq_logps, per_token_logps, loss_mask
                 if self.clear_cuda_cache and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 if _VERBOSE and (end == total or end % max(self.micro_batch_size * 64, 1) == 0):
                     _vprint(f"logprob progress: {end}/{total}")
 
         _vprint("finished logprob pass")
-        return torch.cat(all_logps, dim=0)
+        return torch.cat(all_logps, dim=0), all_token_logps
 
     def score_batch(self, solution_strs, extra_infos=None):
         # print("solution_strs:", solution_strs)
@@ -318,27 +331,50 @@ class LogRatioRewardScorer:
             _vprint(f"score_batch size={len(encoded_list)}, avg_response_len={avg_len:.1f}")
         input_ids, attention_mask, label_ids, response_lens = self._prepare_batch_tensors(encoded_list=encoded_list)
 
-        policy_logps = self._sequence_log_probs(self.policy_model, input_ids, attention_mask, label_ids)
-        ref_logps = self._sequence_log_probs(self.reference_model, input_ids, attention_mask, label_ids)
-        log_ratio = policy_logps - ref_logps
+        policy_logps, policy_token_logps = self._sequence_log_probs(self.policy_model, input_ids, attention_mask, label_ids)
+        ref_logps, ref_token_logps = self._sequence_log_probs(self.reference_model, input_ids, attention_mask, label_ids)
 
-        if self.normalize_by_length:
-            denom = response_lens.clamp_min(1).to(log_ratio.dtype)
-            log_ratio = log_ratio / denom
+        log_ratio_values = []
+        token_reward_values = []
+        for token_len, p_token_logps, r_token_logps in zip(response_lens.tolist(), policy_token_logps, ref_token_logps):
+            paired_len = min(int(token_len), len(p_token_logps), len(r_token_logps))
+            token_log_ratio = [float(p_token_logps[i] - r_token_logps[i]) for i in range(paired_len)]
+            if self.normalize_by_length and paired_len > 0:
+                token_log_ratio = [value / float(paired_len) for value in token_log_ratio]
+            token_rewards = [self.beta * value for value in token_log_ratio]
+            reward_total = sum(token_rewards)
+            if self.reward_clip_min is not None and math.isfinite(reward_total) and reward_total < self.reward_clip_min:
+                token_rewards = list(token_rewards)
+                if token_rewards:
+                    # Keep the token representation consistent with a sequence-level
+                    # reward floor by applying the correction on the terminal token.
+                    token_rewards[-1] += self.reward_clip_min - reward_total
+                reward_total = self.reward_clip_min
+            log_ratio_values.append(sum(token_log_ratio))
+            token_reward_values.append(token_rewards)
 
-        rewards = self.beta * log_ratio
-        log_ratio_mean = float(log_ratio.mean().item())
+        log_ratio = torch.tensor(log_ratio_values, dtype=torch.float32)
+        rewards = torch.tensor([sum(token_rewards) for token_rewards in token_reward_values], dtype=torch.float32)
+        log_ratio_mean = float(log_ratio.mean().item()) if log_ratio.numel() > 0 else 0.0
         if not math.isfinite(log_ratio_mean):
             log_ratio_mean = 0.0
 
         results = []
-        for reward, lr, p_logp, r_logp, resp_len in zip(rewards, log_ratio, policy_logps, ref_logps, response_lens):
+        for reward, lr, p_logp, r_logp, resp_len, token_rewards in zip(
+            rewards,
+            log_ratio,
+            policy_logps,
+            ref_logps,
+            response_lens,
+            token_reward_values,
+        ):
             reward_val = float(reward.item())
             if not math.isfinite(reward_val):
                 reward_val = 0.0
             results.append(
                 {
                     "score": reward_val,
+                    "token_scores": token_rewards,
                     "log_ratio": float(lr.item()),
                     "log_ratio_mean": log_ratio_mean,
                     "pi_logp": float(p_logp.item()),
@@ -380,6 +416,7 @@ def compute_score(
     attn_implementation="eager",
     max_seq_len=None,
     normalize_by_length=False,
+    reward_clip_min=None,
     clear_cuda_cache=False,
 ):
     del data_sources, ground_truths
@@ -405,6 +442,7 @@ def compute_score(
         attn_implementation=attn_implementation,
         max_seq_len=max_seq_len,
         normalize_by_length=normalize_by_length,
+        reward_clip_min=reward_clip_min,
         clear_cuda_cache=clear_cuda_cache,
     )
     return scorer.score_batch(solution_strs=solution_strs, extra_infos=extra_infos)

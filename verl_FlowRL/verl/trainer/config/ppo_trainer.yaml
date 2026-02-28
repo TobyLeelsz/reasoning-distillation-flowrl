@@ -242,7 +242,7 @@ custom_reward_function:
     policy_model_path: /workspace/checkpoints/checkpoint-800
     reference_model_path: ${actor_rollout_ref.model.path}
     tokenizer_path: ${actor_rollout_ref.model.path}
-    beta: 2.0 # 0.001
+    beta: 0.001 # 0.001
     micro_batch_size: 1
     device_map: auto
     torch_dtype: bfloat16
@@ -252,7 +252,7 @@ custom_reward_function:
     trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     use_fast_tokenizer: True
     max_seq_len: null
-    normalize_by_length: True
+    normalize_by_length: False
     clear_cuda_cache: False
 
 algorithm:

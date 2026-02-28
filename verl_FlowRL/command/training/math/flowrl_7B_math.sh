@@ -288,7 +288,7 @@ REWARD_MODE=${REWARD_MODE:-log_ratio_rm}
 RM_POLICY_MODEL=${RM_POLICY_MODEL:-/workspace/checkpoints/checkpoint-800}
 RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-$PRETRAINED_MODEL}
 RM_TOKENIZER_PATH=${RM_TOKENIZER_PATH:-$PRETRAINED_MODEL}
-RM_BETA=${RM_BETA:-0.2} # 0.001
+RM_BETA=${RM_BETA:-0.001} # 0.001
 RM_MICRO_BSZ=${RM_MICRO_BSZ:-1}
 RM_DEVICE_MAP=${RM_DEVICE_MAP:-auto}
 RM_TORCH_DTYPE=${RM_TORCH_DTYPE:-bfloat16}
@@ -381,6 +381,8 @@ case "$REWARD_MODE" in
       custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
       custom_reward_function.reward_kwargs.offload_folder=$RM_OFFLOAD_FOLDER
       custom_reward_function.reward_kwargs.max_gpu_memory=$RM_MAX_GPU_MEMORY
+      custom_reward_function.reward_kwargs.normalize_by_length=False
+      +custom_reward_function.reward_kwargs.reward_clip_min=-1.0
     )
     ;;
   *)
@@ -551,6 +553,8 @@ trap 'cleanup; exit 130' INT TERM
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    algorithm.norm_adv_by_std_in_grpo=True \
+    +algorithm.adv_clip_min_before_normalization=-5.0 \
     data.train_files=$dapo_train_path \
     data.val_files=$r1_test_path \
     data.train_batch_size=$train_batch_size \
