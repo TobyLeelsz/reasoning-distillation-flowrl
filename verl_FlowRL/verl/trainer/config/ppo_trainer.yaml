@@ -243,6 +243,11 @@ custom_reward_function:
     reference_model_path: ${actor_rollout_ref.model.path}
     tokenizer_path: ${actor_rollout_ref.model.path}
     beta: 2.0 # 0.001
+    repeat_penalty_weight: 0.0
+    repeat_penalty_ngram_size: null
+    repeat_penalty_clip_min: null
+    log_ratio_reward_clip_min: null
+    reward_clip_min: null
     micro_batch_size: 1
     device_map: auto
     torch_dtype: bfloat16

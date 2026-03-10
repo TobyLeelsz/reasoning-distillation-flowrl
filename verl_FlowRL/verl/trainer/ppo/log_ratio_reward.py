@@ -19,6 +19,7 @@ from typing import Iterable, Optional
 
 import torch
 import torch.nn.functional as F
+from verl.utils.reward_score import default_compute_score
 
 PROMPT_TOKEN_IDS_KEY = "__verl_prompt_token_ids"
 RESPONSE_TOKEN_IDS_KEY = "__verl_response_token_ids"
@@ -96,7 +97,20 @@ def _encode_prompt_response_ids(
         "attention_mask": attention_mask,
         "labels": labels,
         "response_token_len": int(response_token_len),
+        "response_token_ids": input_ids[p_len:],
     }
+
+
+def _extract_scalar_score(score_obj) -> float:
+    if isinstance(score_obj, dict):
+        score_obj = score_obj.get("score", 0.0)
+    try:
+        score = float(score_obj)
+    except (TypeError, ValueError):
+        score = 0.0
+    if not math.isfinite(score):
+        score = 0.0
+    return score
 
 
 class LogRatioRewardScorer:
@@ -118,6 +132,11 @@ class LogRatioRewardScorer:
         max_seq_len: Optional[int],
         normalize_by_length: bool,
         clear_cuda_cache: bool,
+        repeat_penalty_weight: float,
+        repeat_penalty_ngram_size: Optional[int],
+        repeat_penalty_clip_min: Optional[float],
+        log_ratio_reward_clip_min: Optional[float],
+        reward_clip_min: Optional[float],
     ):
         from transformers import AutoTokenizer
 
@@ -134,6 +153,15 @@ class LogRatioRewardScorer:
         self.max_seq_len = int(max_seq_len) if max_seq_len is not None else _DEFAULT_MAX_SEQ_LEN
         self.normalize_by_length = bool(normalize_by_length)
         self.clear_cuda_cache = bool(clear_cuda_cache)
+        repeat_penalty_weight = float(repeat_penalty_weight) if repeat_penalty_weight is not None else 0.0
+        repeat_penalty_ngram_size = int(repeat_penalty_ngram_size) if repeat_penalty_ngram_size is not None else None
+        repeat_penalty_clip_min = float(repeat_penalty_clip_min) if repeat_penalty_clip_min is not None else None
+        self.log_ratio_reward_clip_min = (
+            float(log_ratio_reward_clip_min) if log_ratio_reward_clip_min is not None else None
+        )
+        self.reward_clip_min = float(reward_clip_min) if reward_clip_min is not None else None
+        if repeat_penalty_weight != 0.0 or repeat_penalty_ngram_size is not None or repeat_penalty_clip_min is not None:
+            _vprint("repeat penalty kwargs are ignored; final reward uses rule-based reward + log-ratio reward.")
 
         if self.device_map in {"auto", "cuda"} and not torch.cuda.is_available():
             self.device_map = "cpu"
@@ -158,7 +186,9 @@ class LogRatioRewardScorer:
         self.reference_model = self._load_model(reference_model_path)
         _vprint(
             f"initialized scorer: device_map={self.device_map}, dtype={self.torch_dtype}, "
-            f"micro_batch_size={self.micro_batch_size}, max_seq_len={self.max_seq_len}"
+            f"micro_batch_size={self.micro_batch_size}, max_seq_len={self.max_seq_len}, "
+            f"log_ratio_reward_clip_min={self.log_ratio_reward_clip_min}, "
+            f"reward_clip_min={self.reward_clip_min}"
         )
 
     def _build_max_memory(self) -> Optional[dict]:
@@ -307,9 +337,16 @@ class LogRatioRewardScorer:
         _vprint("finished logprob pass")
         return torch.cat(all_logps, dim=0)
 
-    def score_batch(self, solution_strs, extra_infos=None):
-        # print("solution_strs:", solution_strs)
-        # print("extra_infos:", extra_infos)
+    def score_batch(self, data_sources, solution_strs, ground_truths, extra_infos=None):
+        solution_strs = list(solution_strs)
+        data_sources = list(data_sources)
+        ground_truths = list(ground_truths)
+        extra_infos = list(extra_infos) if extra_infos is not None else [None] * len(solution_strs)
+        if len(data_sources) != len(solution_strs) or len(ground_truths) != len(solution_strs):
+            raise ValueError("`data_sources`, `solution_strs`, and `ground_truths` must have the same length.")
+        if len(extra_infos) != len(solution_strs):
+            extra_infos = [None] * len(solution_strs)
+
         encoded_list = self._prepare_encoded_sequences(solution_strs=solution_strs, extra_infos=extra_infos)
         if _VERBOSE:
             avg_len = 0.0
@@ -332,8 +369,36 @@ class LogRatioRewardScorer:
             log_ratio_mean = 0.0
 
         results = []
-        for reward, lr, p_logp, r_logp, resp_len in zip(rewards, log_ratio, policy_logps, ref_logps, response_lens):
-            reward_val = float(reward.item())
+        for reward, lr, p_logp, r_logp, resp_len, data_source, solution_str, ground_truth, extra_info in zip(
+            rewards,
+            log_ratio,
+            policy_logps,
+            ref_logps,
+            response_lens,
+            data_sources,
+            solution_strs,
+            ground_truths,
+            extra_infos,
+        ):
+            if str(data_source) == "warmup":
+                rule_reward_raw = 0.0
+            else:
+                rule_reward_raw = default_compute_score(
+                    data_source=data_source,
+                    solution_str=solution_str,
+                    ground_truth=ground_truth,
+                    extra_info=extra_info,
+                )
+            rule_reward = _extract_scalar_score(rule_reward_raw)
+
+            log_ratio_reward = float(reward.item())
+            if self.log_ratio_reward_clip_min is not None and math.isfinite(log_ratio_reward):
+                log_ratio_reward = max(log_ratio_reward, self.log_ratio_reward_clip_min)
+
+            raw_reward_val = log_ratio_reward + rule_reward
+            reward_val = raw_reward_val
+            if self.reward_clip_min is not None and math.isfinite(reward_val):
+                reward_val = max(reward_val, self.reward_clip_min)
             if not math.isfinite(reward_val):
                 reward_val = 0.0
             results.append(
@@ -344,6 +409,11 @@ class LogRatioRewardScorer:
                     "pi_logp": float(p_logp.item()),
                     "pi_ref_logp": float(r_logp.item()),
                     "response_token_len": int(resp_len.item()),
+                    "log_ratio_reward": log_ratio_reward,
+                    "log_ratio_reward_clip_min": self.log_ratio_reward_clip_min,
+                    "rule_reward": rule_reward,
+                    "raw_score_before_clip": raw_reward_val,
+                    "reward_clip_min": self.reward_clip_min,
                 }
             )
 
@@ -381,9 +451,12 @@ def compute_score(
     max_seq_len=None,
     normalize_by_length=False,
     clear_cuda_cache=False,
+    repeat_penalty_weight=0.0,
+    repeat_penalty_ngram_size=None,
+    repeat_penalty_clip_min=None,
+    log_ratio_reward_clip_min=None,
+    reward_clip_min=None,
 ):
-    del data_sources, ground_truths
-
     if not policy_model_path:
         raise ValueError("`policy_model_path` must be provided for log-ratio reward.")
     if not reference_model_path:
@@ -406,5 +479,15 @@ def compute_score(
         max_seq_len=max_seq_len,
         normalize_by_length=normalize_by_length,
         clear_cuda_cache=clear_cuda_cache,
+        repeat_penalty_weight=repeat_penalty_weight,
+        repeat_penalty_ngram_size=repeat_penalty_ngram_size,
+        repeat_penalty_clip_min=repeat_penalty_clip_min,
+        log_ratio_reward_clip_min=log_ratio_reward_clip_min,
+        reward_clip_min=reward_clip_min,
     )
-    return scorer.score_batch(solution_strs=solution_strs, extra_infos=extra_infos)
+    return scorer.score_batch(
+        data_sources=data_sources,
+        solution_strs=solution_strs,
+        ground_truths=ground_truths,
+        extra_infos=extra_infos,
+    )

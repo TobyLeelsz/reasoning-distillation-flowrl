@@ -8,6 +8,28 @@ data:
 custom_reward_function:
   path: null
   name: compute_score
+  reward_kwargs:
+    policy_model_path: null
+    reference_model_path: null
+    tokenizer_path: null
+    beta: 0.001
+    repeat_penalty_weight: 0.0
+    repeat_penalty_ngram_size: null
+    repeat_penalty_clip_min: null
+    log_ratio_reward_clip_min: null
+    reward_clip_min: null
+    micro_batch_size: 1
+    device_map: auto
+    torch_dtype: bfloat16
+    offload_folder: /tmp/verl_reward_offload
+    max_gpu_memory: 2GiB
+    max_cpu_memory: null
+    trust_remote_code: False
+    use_fast_tokenizer: True
+    attn_implementation: eager
+    max_seq_len: null
+    normalize_by_length: False
+    clear_cuda_cache: False
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.

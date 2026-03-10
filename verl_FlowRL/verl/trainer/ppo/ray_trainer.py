@@ -335,6 +335,44 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     timing_raw[name] += timer.last
 
 
+def _extract_finite_float_values(values) -> list[float]:
+    """Best-effort conversion of metric values into a flat list of finite floats."""
+    if values is None:
+        return []
+
+    finite_values: list[float] = []
+    for value in values:
+        if isinstance(value, (list, tuple, np.ndarray)):
+            candidates = np.asarray(value).reshape(-1).tolist()
+        else:
+            candidates = [value]
+
+        for candidate in candidates:
+            try:
+                numeric_value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric_value):
+                finite_values.append(numeric_value)
+
+    return finite_values
+
+
+def _add_reward_component_stats(metrics: dict, reward_extra_infos_dict: dict[str, list]):
+    """Log mean/min/max for reward components when available."""
+    component_to_prefix = {
+        "rule_reward": "reward/rule_reward",
+        "log_ratio_reward": "reward/log_ratio_reward",
+    }
+    for component_key, metric_prefix in component_to_prefix.items():
+        values = _extract_finite_float_values(reward_extra_infos_dict.get(component_key))
+        if not values:
+            continue
+        metrics[f"{metric_prefix}/mean"] = float(np.mean(values))
+        metrics[f"{metric_prefix}/min"] = float(np.min(values))
+        metrics[f"{metric_prefix}/max"] = float(np.max(values))
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -1180,21 +1218,7 @@ class RayPPOTrainer:
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
-                            log_ratio_values = reward_extra_infos_dict.get("log_ratio_mean")
-                            if log_ratio_values is None:
-                                log_ratio_values = reward_extra_infos_dict.get("log_ratio")
-                            if log_ratio_values is not None:
-                                valid_log_ratio_values = []
-                                for value in log_ratio_values:
-                                    try:
-                                        value = float(value)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if np.isfinite(value):
-                                        valid_log_ratio_values.append(value)
-                                if valid_log_ratio_values:
-                                    metrics["reward/log_ratio/mean"] = float(np.mean(valid_log_ratio_values))
+                            _add_reward_component_stats(metrics, reward_extra_infos_dict)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

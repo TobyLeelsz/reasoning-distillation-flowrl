@@ -34,6 +34,10 @@ export WANDB__SERVICE_WAIT=600
 #   bash flowrl_7B_math.sh restart-2rollout-2reward
 # This performs a clean Ray restart and relaunches with:
 #   log-ratio RM reward, 2 GPUs for actor+rollout/update, 2 GPUs for async reward.
+#
+#   bash flowrl_7B_math.sh restart-qwen3-1p7b-rule
+# This performs a clean Ray restart and relaunches with:
+#   Qwen/Qwen3-1.7B-Base + full rule-based reward (train + eval) on all visible GPUs.
 if [ "${1:-}" = "restart-2plus2" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
@@ -74,8 +78,8 @@ if [ "${1:-}" = "restart-2rollout-2reward" ]; then
         OPTION1_SPLIT_MODE=1 \
         ACTOR_ROLLOUT_GPUS=2 \
         REWARD_ASYNC_NUM_GPUS=2 \
-        TRAIN_BATCH_SIZE=64 \
-        ROLLOUT_N=1 \
+        TRAIN_BATCH_SIZE=512 \
+        ROLLOUT_N=4 \
         MAX_PROMPT_LENGTH=2048 \
         ROLLOUT_GPU_MEMORY_UTIL=0.45 \
         ROLLOUT_MAX_NUM_SEQS=8 \
@@ -163,17 +167,42 @@ if [ "${1:-}" = "restart-rule-2gpu" ]; then
         bash "$0" "$@"
 fi
 
-PRETRAINED_MODEL=../downloads/Qwen/Qwen2.5-7B
+if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
+    shift
+    ray stop --force >/dev/null 2>&1 || true
+    exec env \
+        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+        MODEL_TAG=qwen3_1p7b \
+        MODEL_SIZE_DIR=1.7B \
+        REWARD_MODE=rule \
+        USE_RULE_REWARD_FOR_EVAL=1 \
+        OPTION1_SPLIT_MODE=0 \
+        LOGGER_MODE=both \
+        WANDB_MODE=online \
+        VERL_WANDB_DISABLE_ON_ERROR=0 \
+        RAY_CLEAN_START=1 \
+        bash "$0" "$@"
+fi
+
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-Qwen/Qwen3-1.7B-Base}
+MODEL_TAG=${MODEL_TAG:-qwen3_1p7b}
+MODEL_SIZE_DIR=${MODEL_SIZE_DIR:-1.7B}
+REWARD_MODE=${REWARD_MODE:-rule}
+USE_RULE_REWARD_FOR_EVAL=${USE_RULE_REWARD_FOR_EVAL:-1}
 n_nodes=${N_NODES:-1}
 n_gpus_per_node=${N_GPUS_PER_NODE:-4}
 tensor_model_parallel_size=${ROLLOUT_TP_SIZE:-1}
-save_freq=${SAVE_FREQ:-200}
+save_freq=100
 
 # Split mode:
 # reserve some GPUs for actor+rollout/update and the rest for async reward computation.
-# Default split is 2 (actor/update) + 2 (reward) on a 4-GPU node.
+# Default split is 2 (actor/update) + 2 (reward) on a 4-GPU node for log-ratio reward.
+default_split_mode=1
+if [ "$REWARD_MODE" = "rule" ]; then
+    default_split_mode=0
+fi
 if [ "$n_gpus_per_node" -ge 4 ]; then
-    OPTION1_SPLIT_MODE=${OPTION1_SPLIT_MODE:-1}
+    OPTION1_SPLIT_MODE=${OPTION1_SPLIT_MODE:-$default_split_mode}
 else
     OPTION1_SPLIT_MODE=${OPTION1_SPLIT_MODE:-0}
 fi
@@ -266,29 +295,34 @@ PY
     r1_test_path="$eval_mix_path"
 fi
 
-base_experiment_name="flowrl_qwen_7b_math"
+base_experiment_name="flowrl_${MODEL_TAG}_math"
 max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
 max_response_length=${MAX_RESPONSE_LENGTH:-8192}
 train_batch_size=${TRAIN_BATCH_SIZE:-512}
-rollout_n=${ROLLOUT_N:-8}
+rollout_n=${ROLLOUT_N:-4}
 rollout_gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTIL:-0.6}
 rollout_max_num_seqs=${ROLLOUT_MAX_NUM_SEQS:-1024}
 actor_param_offload=${ACTOR_PARAM_OFFLOAD:-false}
 actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-false}
 ref_param_offload=${REF_PARAM_OFFLOAD:-false}
 resume_mode=${RESUME_MODE:-auto}
-use_rule_reward_for_eval=${USE_RULE_REWARD_FOR_EVAL:-0}
+use_rule_reward_for_eval=${USE_RULE_REWARD_FOR_EVAL}
 
 # Reward switch:
 # - REWARD_MODE=rule: original rule-based reward
 # - REWARD_MODE=log_ratio_rm: beta * log(pi/pi_ref) using fine-tuned RM checkpoint
-REWARD_MODE=${REWARD_MODE:-log_ratio_rm}
+#   plus a repeated 10-gram penalty
 
 # Log-ratio reward model settings (used when REWARD_MODE=log_ratio_rm)
 RM_POLICY_MODEL=${RM_POLICY_MODEL:-/workspace/checkpoints/checkpoint-800}
 RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-$PRETRAINED_MODEL}
 RM_TOKENIZER_PATH=${RM_TOKENIZER_PATH:-$PRETRAINED_MODEL}
 RM_BETA=${RM_BETA:-0.2} # 0.001
+RM_REPEAT_PENALTY_WEIGHT=${RM_REPEAT_PENALTY_WEIGHT:-0.01}
+RM_REPEAT_PENALTY_NGRAM_SIZE=${RM_REPEAT_PENALTY_NGRAM_SIZE:-10}
+RM_REPEAT_PENALTY_CLIP_MIN=${RM_REPEAT_PENALTY_CLIP_MIN:--1.0}
+RM_LOG_RATIO_REWARD_CLIP_MIN=${RM_LOG_RATIO_REWARD_CLIP_MIN:--1.0}
+RM_REWARD_CLIP_MIN=${RM_REWARD_CLIP_MIN:-null}
 RM_MICRO_BSZ=${RM_MICRO_BSZ:-1}
 RM_DEVICE_MAP=${RM_DEVICE_MAP:-auto}
 RM_TORCH_DTYPE=${RM_TORCH_DTYPE:-bfloat16}
@@ -323,12 +357,12 @@ SINGLE_GPU_MAX_NUM_SEQS=${SINGLE_GPU_MAX_NUM_SEQS:-16}
 # - LOGGER_MODE=console: no wandb
 # - LOGGER_MODE=wandb: wandb only
 # - LOGGER_MODE=both: console + wandb
-LOGGER_MODE=${LOGGER_MODE:-console}
+LOGGER_MODE=${LOGGER_MODE:-both}
 WANDB_MODE=${WANDB_MODE:-online}
 VERL_WANDB_INIT_TIMEOUT=${VERL_WANDB_INIT_TIMEOUT:-600}
 VERL_WANDB_INIT_RETRIES=${VERL_WANDB_INIT_RETRIES:-3}
 VERL_WANDB_RETRY_SLEEP=${VERL_WANDB_RETRY_SLEEP:-15}
-VERL_WANDB_DISABLE_ON_ERROR=${VERL_WANDB_DISABLE_ON_ERROR:-1}
+VERL_WANDB_DISABLE_ON_ERROR=${VERL_WANDB_DISABLE_ON_ERROR:-0}
 export WANDB_MODE VERL_WANDB_INIT_TIMEOUT VERL_WANDB_INIT_RETRIES VERL_WANDB_RETRY_SLEEP VERL_WANDB_DISABLE_ON_ERROR
 # Testing profile:
 # TESTING_MODE=1 enables lightweight settings to quickly verify end-to-end flow.
@@ -376,6 +410,11 @@ case "$REWARD_MODE" in
       custom_reward_function.reward_kwargs.reference_model_path=$RM_REFERENCE_MODEL
       custom_reward_function.reward_kwargs.tokenizer_path=$RM_TOKENIZER_PATH
       custom_reward_function.reward_kwargs.beta=$RM_BETA
+      custom_reward_function.reward_kwargs.repeat_penalty_weight=$RM_REPEAT_PENALTY_WEIGHT
+      custom_reward_function.reward_kwargs.repeat_penalty_ngram_size=$RM_REPEAT_PENALTY_NGRAM_SIZE
+      custom_reward_function.reward_kwargs.repeat_penalty_clip_min=$RM_REPEAT_PENALTY_CLIP_MIN
+      custom_reward_function.reward_kwargs.log_ratio_reward_clip_min=$RM_LOG_RATIO_REWARD_CLIP_MIN
+      custom_reward_function.reward_kwargs.reward_clip_min=$RM_REWARD_CLIP_MIN
       custom_reward_function.reward_kwargs.micro_batch_size=$RM_MICRO_BSZ
       custom_reward_function.reward_kwargs.device_map=$RM_DEVICE_MAP
       custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
@@ -391,7 +430,7 @@ case "$REWARD_MODE" in
 esac
 
 experiment_name="${base_experiment_name}_${REWARD_MODE}"
-OUTPUT_DIR=checkpoints/FlowRL/math/7B/$experiment_name
+OUTPUT_DIR=checkpoints/FlowRL/math/$MODEL_SIZE_DIR/$experiment_name
 
 safe_overrides=()
 if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$LOG_RATIO_SAFE_MODE" = "1" ]; then
@@ -442,7 +481,7 @@ fi
 testing_overrides=()
 if [ "$TESTING_MODE" = "1" ]; then
     experiment_name="${experiment_name}_test"
-    OUTPUT_DIR=checkpoints/FlowRL/math/7B/$experiment_name
+    OUTPUT_DIR=checkpoints/FlowRL/math/$MODEL_SIZE_DIR/$experiment_name
     testing_overrides=(
         trainer.val_before_train=False
         trainer.test_freq=-1
