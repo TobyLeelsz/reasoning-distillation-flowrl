@@ -1,0 +1,6 @@
+sft_out_qwen3_1p7b
+*.jsonl
+rm_out
+checkpoint_sft
+flow_rl_new
+wandb
