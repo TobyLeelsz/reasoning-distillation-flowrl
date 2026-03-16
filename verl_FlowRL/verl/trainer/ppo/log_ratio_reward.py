@@ -395,17 +395,29 @@ class LogRatioRewardScorer:
             # first_term = -1 when clip(rule_reward, 0, 1) == 0;
             # first_term = clip(log_ratio_reward, min=-1) when clip(rule_reward, 0, 1) == 1.
             rule_reward_gate = max(0.0, min(1.0, rule_reward))
-            if rule_reward_gate == 0.0:
-                log_ratio_reward = -1.0
+            # if rule_reward_gate == 0.0:
+            #     log_ratio_reward = -1.0
+            # else:
+            #     log_ratio_reward = float(reward.item())
+            #     log_ratio_clip_min = -1.0
+            #     if self.log_ratio_reward_clip_min is not None:
+            #         log_ratio_clip_min = max(log_ratio_clip_min, self.log_ratio_reward_clip_min)
+            #     if math.isfinite(log_ratio_reward):
+            #         log_ratio_reward = max(log_ratio_reward, log_ratio_clip_min)
+            #     else:
+            #         log_ratio_reward = log_ratio_clip_min
+            log_ratio_reward = float(reward.item())
+            log_ratio_clip_min = -1.0
+            if self.log_ratio_reward_clip_min is not None:
+                log_ratio_clip_min = max(log_ratio_clip_min, self.log_ratio_reward_clip_min)
+            if math.isfinite(log_ratio_reward):
+                log_ratio_reward = max(log_ratio_reward, log_ratio_clip_min)
             else:
-                log_ratio_reward = float(reward.item())
-                log_ratio_clip_min = -1.0
-                if self.log_ratio_reward_clip_min is not None:
-                    log_ratio_clip_min = max(log_ratio_clip_min, self.log_ratio_reward_clip_min)
-                if math.isfinite(log_ratio_reward):
-                    log_ratio_reward = max(log_ratio_reward, log_ratio_clip_min)
-                else:
-                    log_ratio_reward = log_ratio_clip_min
+                log_ratio_reward = log_ratio_clip_min
+            
+            if log_ratio_reward > 0.0 and rule_reward == -1.0:
+                # If log_ratio_reward is positive but rule_reward is -1, set log_ratio_reward to 0 to avoid positive reward.
+                log_ratio_reward = 0.0
 
             raw_reward_val = log_ratio_reward + rule_reward
             reward_val = raw_reward_val
