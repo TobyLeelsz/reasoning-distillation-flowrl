@@ -1,11 +1,85 @@
 #!/bin/bash
 export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export TORCH_NCCL_BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT:-1}
+export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
+export NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}
+# vLLM's CuMemAllocator is incompatible with expandable_segments:True.
+if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
+    echo "[WARN] Unsetting PYTORCH_CUDA_ALLOC_CONF (${PYTORCH_CUDA_ALLOC_CONF}) because vLLM memory pool is incompatible with expandable_segments:True."
+    unset PYTORCH_CUDA_ALLOC_CONF
+fi
 
 export WANDB_INIT_TIMEOUT=600
 export WANDB_HTTP_TIMEOUT=600
 export WANDB__SERVICE_WAIT=600
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_${USER}}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_${USER}}
+mkdir -p "$RAY_TMPDIR"
+mkdir -p "$TRITON_CACHE_DIR"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERL_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Prefer CUDA toolchain from the active conda env so Ray workers don't inherit
+# a stale CUDA_HOME from another environment.
+if [ -n "${CONDA_PREFIX:-}" ]; then
+    resolved_cuda_home=""
+    if [ -x "${CONDA_PREFIX}/targets/x86_64-linux/bin/nvcc" ]; then
+        resolved_cuda_home="${CONDA_PREFIX}/targets/x86_64-linux"
+    elif [ -x "${CONDA_PREFIX}/bin/nvcc" ]; then
+        resolved_cuda_home="$(cd "$(dirname "${CONDA_PREFIX}/bin/nvcc")/.." && pwd)"
+    fi
+
+    if [ -n "$resolved_cuda_home" ]; then
+        export CUDA_HOME="$resolved_cuda_home"
+        export CUDA_PATH="$resolved_cuda_home"
+        case ":$PATH:" in
+            *":${CONDA_PREFIX}/nvvm/bin:"*) ;;
+            *) export PATH="${CONDA_PREFIX}/nvvm/bin:$PATH" ;;
+        esac
+        case ":$PATH:" in
+            *":$resolved_cuda_home/bin:"*) ;;
+            *) export PATH="$resolved_cuda_home/bin:$PATH" ;;
+        esac
+        for _lib_dir in "$resolved_cuda_home/lib64" "$resolved_cuda_home/lib" "${CONDA_PREFIX}/lib"; do
+            if [ -d "$_lib_dir" ]; then
+                case ":${LD_LIBRARY_PATH:-}:" in
+                    *":$_lib_dir:"*) ;;
+                    *) export LD_LIBRARY_PATH="$_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+                esac
+            fi
+        done
+        echo "[INFO] Using conda CUDA_HOME=$CUDA_HOME"
+    fi
+fi
+
+# DeepSpeed queries nvcc using CUDA_HOME. If a stale CUDA_HOME is inherited
+# from shell startup files, actor import can fail before training starts.
+if [ -z "${CUDA_HOME:-}" ] || [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
+    if nvcc_bin="$(command -v nvcc 2>/dev/null)"; then
+        resolved_cuda_home="$(cd "$(dirname "$nvcc_bin")/.." && pwd)"
+        export CUDA_HOME="$resolved_cuda_home"
+        export CUDA_PATH="$resolved_cuda_home"
+        case ":$PATH:" in
+            *":$resolved_cuda_home/bin:"*) ;;
+            *) export PATH="$resolved_cuda_home/bin:$PATH" ;;
+        esac
+        echo "[INFO] Resolved CUDA_HOME=$CUDA_HOME"
+    else
+        echo "[WARN] nvcc not found in PATH; DeepSpeed CUDA op checks may fail."
+    fi
+fi
+if [ -z "${CUDA_HOME:-}" ] || [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
+    export DS_SKIP_CUDA_CHECK=1
+    echo "[WARN] CUDA_HOME still invalid ('${CUDA_HOME:-unset}'); set DS_SKIP_CUDA_CHECK=1 to bypass DeepSpeed CUDA version check."
+fi
 
 # Built-in restart helper:
 #   bash flowrl_7B_math.sh restart-2plus2
@@ -72,20 +146,35 @@ if [ "${1:-}" = "restart-2rollout-2reward" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
     exec env \
+        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+        MODEL_TAG=qwen3_1p7b \
+        MODEL_SIZE_DIR=1.7B \
+        RM_REFERENCE_MODEL=Qwen/Qwen3-1.7B-Base \
+        RM_TOKENIZER_PATH=Qwen/Qwen3-1.7B-Base \
+        RM_POLICY_MODEL=/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629 \
         REWARD_MODE=log_ratio_rm \
         CUDA_VISIBLE_DEVICES=0,1,2,3 \
         N_GPUS_PER_NODE=4 \
         OPTION1_SPLIT_MODE=1 \
         ACTOR_ROLLOUT_GPUS=2 \
         REWARD_ASYNC_NUM_GPUS=2 \
+        RM_ONLINE_TRAIN_USE_DATAPARALLEL=1 \
+        RM_MICRO_BSZ=2 \
+        RM_ONLINE_TRAIN_MICRO_BSZ=2 \
+        RM_ONLINE_TRAIN_UPDATES_PER_BATCH=4 \
         TRAIN_BATCH_SIZE=512 \
         ROLLOUT_N=4 \
         MAX_PROMPT_LENGTH=2048 \
         ROLLOUT_GPU_MEMORY_UTIL=0.45 \
         ROLLOUT_MAX_NUM_SEQS=8 \
-        ACTOR_PARAM_OFFLOAD=true \
-        ACTOR_OPTIMIZER_OFFLOAD=true \
-        REF_PARAM_OFFLOAD=true \
+        ACTOR_PARAM_OFFLOAD=false \
+        ACTOR_OPTIMIZER_OFFLOAD=false \
+        REF_PARAM_OFFLOAD=false \
+        USE_TORCH_COMPILE=0 \
+        FSDP_SYNC_MODULE_STATES=False \
+        VERL_SKIP_MODEL_INIT_BARRIER=1 \
+        DATALOADER_NUM_WORKERS=2 \
+        REWARD_ASYNC_NUM_CPUS=2 \
         RESUME_MODE=disable \
         USE_RULE_REWARD_FOR_EVAL=1 \
         RM_FORCE_CPU=0 \
@@ -171,7 +260,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
     exec env \
-        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+        PRETRAINED_MODEL=$PROJECT_ROOT/downloads/Qwen/sft-dapo-17k-qwen3-1.7b \
         MODEL_TAG=qwen3_1p7b \
         MODEL_SIZE_DIR=1.7B \
         REWARD_MODE=rule \
@@ -184,7 +273,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
         bash "$0" "$@"
 fi
 
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-Qwen/Qwen3-1.7B-Base}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-$PROJECT_ROOT/downloads/Qwen/sft-dapo-17k-qwen3-1.7b}
 MODEL_TAG=${MODEL_TAG:-qwen3_1p7b}
 MODEL_SIZE_DIR=${MODEL_SIZE_DIR:-1.7B}
 REWARD_MODE=${REWARD_MODE:-rule}
@@ -234,8 +323,8 @@ if [ "$OPTION1_SPLIT_MODE" = "1" ]; then
     n_gpus_per_node=$ACTOR_ROLLOUT_GPUS
 fi
 
-dapo_train_path=../data/math_data/dapo-math-17k.parquet
-base_val_path=${FLOWRL_MATH_VAL_PATH:-../data/math_data/validation.parquet}
+dapo_train_path=${FLOWRL_MATH_TRAIN_PATH:-$PROJECT_ROOT/data/math_data/dapo-math-17k.parquet}
+base_val_path=${FLOWRL_MATH_VAL_PATH:-$PROJECT_ROOT/data/math_data/validation.parquet}
 eval_keep_sources=${FLOWRL_KEEP_EVAL_SOURCES:-aime2024,aime2025,gpqa}
 eval_cache_dir=${FLOWRL_EVAL_CACHE_DIR:-/tmp}
 filter_eval_sources=${FLOWRL_FILTER_EVAL_SOURCES:-1}
@@ -300,13 +389,72 @@ max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
 max_response_length=${MAX_RESPONSE_LENGTH:-8192}
 train_batch_size=${TRAIN_BATCH_SIZE:-512}
 rollout_n=${ROLLOUT_N:-4}
+actor_ppo_mini_batch_size=${ACTOR_PPO_MINI_BATCH_SIZE:-32}
 rollout_gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTIL:-0.6}
 rollout_max_num_seqs=${ROLLOUT_MAX_NUM_SEQS:-1024}
 actor_param_offload=${ACTOR_PARAM_OFFLOAD:-false}
 actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-false}
 ref_param_offload=${REF_PARAM_OFFLOAD:-false}
+use_torch_compile=${USE_TORCH_COMPILE:-1}
+fsdp_sync_module_states=${FSDP_SYNC_MODULE_STATES:-True}
+skip_model_init_barrier=${VERL_SKIP_MODEL_INIT_BARRIER:-0}
 resume_mode=${RESUME_MODE:-auto}
 use_rule_reward_for_eval=${USE_RULE_REWARD_FOR_EVAL}
+cpu_quota=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+if ! [[ "$cpu_quota" =~ ^[0-9]+$ ]]; then
+    cpu_quota=1
+fi
+dataloader_num_workers=${DATALOADER_NUM_WORKERS:-}
+if [ -z "$dataloader_num_workers" ]; then
+    if [ "$cpu_quota" -le 2 ]; then
+        dataloader_num_workers=1
+    elif [ "$cpu_quota" -le 8 ]; then
+        dataloader_num_workers=2
+    else
+        dataloader_num_workers=4
+    fi
+fi
+if ! [[ "$dataloader_num_workers" =~ ^[0-9]+$ ]] || [ "$dataloader_num_workers" -lt 1 ]; then
+    dataloader_num_workers=1
+fi
+default_reward_async_num_cpus=1
+if [ "$cpu_quota" -ge 16 ]; then
+    default_reward_async_num_cpus=2
+fi
+reward_async_num_cpus=${REWARD_ASYNC_NUM_CPUS:-$default_reward_async_num_cpus}
+if ! [[ "$actor_ppo_mini_batch_size" =~ ^[0-9]+$ ]] || [ "$actor_ppo_mini_batch_size" -lt 1 ]; then
+    echo "[ERROR] ACTOR_PPO_MINI_BATCH_SIZE must be an integer >= 1 (got $actor_ppo_mini_batch_size)"
+    exit 1
+fi
+
+
+# Precision switches:
+# - auto: use bf16 when supported by current GPU, otherwise fallback to fp16.
+FSDP_PARAM_DTYPE=${FSDP_PARAM_DTYPE:-auto}
+ROLLOUT_DTYPE=${ROLLOUT_DTYPE:-auto}
+default_gpu_dtype=bfloat16
+if [ "$FSDP_PARAM_DTYPE" = "auto" ] || [ "$ROLLOUT_DTYPE" = "auto" ]; then
+    bf16_supported=$(python3 - <<'PY'
+import torch
+try:
+    ok = bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+except Exception:
+    ok = False
+print("1" if ok else "0")
+PY
+)
+    if [ "$bf16_supported" = "1" ]; then
+        default_gpu_dtype=bfloat16
+    else
+        default_gpu_dtype=float16
+    fi
+fi
+if [ "$FSDP_PARAM_DTYPE" = "auto" ]; then
+    FSDP_PARAM_DTYPE=$default_gpu_dtype
+fi
+if [ "$ROLLOUT_DTYPE" = "auto" ]; then
+    ROLLOUT_DTYPE=$default_gpu_dtype
+fi
 
 # Reward switch:
 # - REWARD_MODE=rule: original rule-based reward
@@ -314,7 +462,7 @@ use_rule_reward_for_eval=${USE_RULE_REWARD_FOR_EVAL}
 #   plus a repeated 10-gram penalty
 
 # Log-ratio reward model settings (used when REWARD_MODE=log_ratio_rm)
-RM_POLICY_MODEL=${RM_POLICY_MODEL:-/workspace/checkpoints/checkpoint-800}
+RM_POLICY_MODEL=${RM_POLICY_MODEL:-/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629}
 RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-$PRETRAINED_MODEL}
 RM_TOKENIZER_PATH=${RM_TOKENIZER_PATH:-$PRETRAINED_MODEL}
 RM_BETA=${RM_BETA:-0.2} # 0.001
@@ -325,13 +473,86 @@ RM_LOG_RATIO_REWARD_CLIP_MIN=${RM_LOG_RATIO_REWARD_CLIP_MIN:--1.0}
 RM_REWARD_CLIP_MIN=${RM_REWARD_CLIP_MIN:-null}
 RM_MICRO_BSZ=${RM_MICRO_BSZ:-1}
 RM_DEVICE_MAP=${RM_DEVICE_MAP:-auto}
-RM_TORCH_DTYPE=${RM_TORCH_DTYPE:-bfloat16}
+RM_TORCH_DTYPE=${RM_TORCH_DTYPE:-$ROLLOUT_DTYPE}
+RM_ATTN_IMPLEMENTATION=${RM_ATTN_IMPLEMENTATION:-eager}
 RM_OFFLOAD_FOLDER=${RM_OFFLOAD_FOLDER:-/tmp/verl_reward_offload}
 RM_MAX_GPU_MEMORY=${RM_MAX_GPU_MEMORY:-2GiB}
+RM_ONLINE_TRAIN=${RM_ONLINE_TRAIN:-1}
+RM_ONLINE_TRAIN_POSITIVE_JSONL=${RM_ONLINE_TRAIN_POSITIVE_JSONL:-/proj/weitongzlab/projects/rm_training/generate/dapo_17k_merged_qwen3.jsonl}
+RM_ONLINE_TRAIN_BETA=${RM_ONLINE_TRAIN_BETA:-0.001}
+RM_ONLINE_TRAIN_LENGTH_NORMALIZE=${RM_ONLINE_TRAIN_LENGTH_NORMALIZE:-0}
+RM_ONLINE_TRAIN_LR=${RM_ONLINE_TRAIN_LR:-5e-7}
+RM_ONLINE_TRAIN_MICRO_BSZ=${RM_ONLINE_TRAIN_MICRO_BSZ:-1}
+RM_ONLINE_TRAIN_MAX_PAIRS=${RM_ONLINE_TRAIN_MAX_PAIRS:-4}
+RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH=${RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH:-null}
+RM_ONLINE_TRAIN_UPDATES_PER_BATCH=${RM_ONLINE_TRAIN_UPDATES_PER_BATCH:-auto}
+RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE=${RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE:-auto}
+RM_ONLINE_TRAIN_SKIP_WARMUP=${RM_ONLINE_TRAIN_SKIP_WARMUP:-0}
+RM_ONLINE_TRAIN_USE_DATAPARALLEL=${RM_ONLINE_TRAIN_USE_DATAPARALLEL:-0}
+RM_ONLINE_TRAIN_SINGLE_WORKER=${RM_ONLINE_TRAIN_SINGLE_WORKER:-1}
 RM_FORCE_CPU=${RM_FORCE_CPU:-0}
 if [ "$RM_FORCE_CPU" = "1" ]; then
     RM_DEVICE_MAP=cpu
     RM_TORCH_DTYPE=float32
+fi
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ ! -e "$RM_POLICY_MODEL" ]; then
+    echo "[WARN] RM_POLICY_MODEL not found: $RM_POLICY_MODEL"
+    echo "[WARN] Falling back to PRETRAINED_MODEL for log-ratio scorer policy path."
+    RM_POLICY_MODEL="$PRETRAINED_MODEL"
+fi
+if [ "$RM_ONLINE_TRAIN" = "1" ]; then
+    RM_ONLINE_TRAIN_BOOL=True
+else
+    RM_ONLINE_TRAIN_BOOL=False
+fi
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$RM_ONLINE_TRAIN" = "1" ] && [ "$RM_ATTN_IMPLEMENTATION" = "sdpa" ]; then
+    echo "[WARN] RM_ATTN_IMPLEMENTATION=sdpa can trigger CUDA device-side assert in online RM updates; forcing eager."
+    RM_ATTN_IMPLEMENTATION=eager
+fi
+if [ "$RM_ONLINE_TRAIN_LENGTH_NORMALIZE" = "1" ]; then
+    RM_ONLINE_TRAIN_LENGTH_NORMALIZE_BOOL=True
+else
+    RM_ONLINE_TRAIN_LENGTH_NORMALIZE_BOOL=False
+fi
+if [ "$RM_ONLINE_TRAIN_USE_DATAPARALLEL" = "1" ]; then
+    RM_ONLINE_TRAIN_USE_DATAPARALLEL_BOOL=True
+else
+    RM_ONLINE_TRAIN_USE_DATAPARALLEL_BOOL=False
+fi
+if [ "$RM_ONLINE_TRAIN_SKIP_WARMUP" = "1" ]; then
+    RM_ONLINE_TRAIN_SKIP_WARMUP_BOOL=True
+else
+    RM_ONLINE_TRAIN_SKIP_WARMUP_BOOL=False
+fi
+if [ "$RM_ONLINE_TRAIN_UPDATES_PER_BATCH" = "auto" ]; then
+    if ! [[ "$train_batch_size" =~ ^[0-9]+$ ]] || [ "$train_batch_size" -lt 1 ]; then
+        echo "[ERROR] TRAIN_BATCH_SIZE must be an integer >= 1 to auto-derive RM updates (got $train_batch_size)"
+        exit 1
+    fi
+    if [ $((train_batch_size % actor_ppo_mini_batch_size)) -ne 0 ]; then
+        echo "[ERROR] TRAIN_BATCH_SIZE ($train_batch_size) must be divisible by ACTOR_PPO_MINI_BATCH_SIZE ($actor_ppo_mini_batch_size) when RM_ONLINE_TRAIN_UPDATES_PER_BATCH=auto"
+        exit 1
+    fi
+    RM_ONLINE_TRAIN_UPDATES_PER_BATCH=$((train_batch_size / actor_ppo_mini_batch_size))
+fi
+if ! [[ "$RM_ONLINE_TRAIN_UPDATES_PER_BATCH" =~ ^[0-9]+$ ]] || [ "$RM_ONLINE_TRAIN_UPDATES_PER_BATCH" -lt 1 ]; then
+    echo "[ERROR] RM_ONLINE_TRAIN_UPDATES_PER_BATCH must be auto or an integer >= 1 (got $RM_ONLINE_TRAIN_UPDATES_PER_BATCH)"
+    exit 1
+fi
+if [ "$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE" = "auto" ]; then
+    if ! [[ "$rollout_n" =~ ^[0-9]+$ ]] || [ "$rollout_n" -lt 1 ]; then
+        echo "[ERROR] ROLLOUT_N must be an integer >= 1 to auto-derive RM rollout minibatch size (got $rollout_n)"
+        exit 1
+    fi
+    RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE=$((actor_ppo_mini_batch_size * rollout_n))
+fi
+if ! [[ "$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE" =~ ^[0-9]+$ ]] || [ "$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE" -lt 1 ]; then
+    echo "[ERROR] RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE must be auto or an integer >= 1 (got $RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE)"
+    exit 1
+fi
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$RM_ONLINE_TRAIN" = "1" ] && [ ! -f "$RM_ONLINE_TRAIN_POSITIVE_JSONL" ]; then
+    echo "[ERROR] RM_ONLINE_TRAIN_POSITIVE_JSONL not found: $RM_ONLINE_TRAIN_POSITIVE_JSONL"
+    exit 1
 fi
 # Safety profile for log-ratio RM to avoid "appears stuck" runs.
 # Set LOG_RATIO_SAFE_MODE=0 to disable these conservative overrides.
@@ -404,7 +625,7 @@ case "$REWARD_MODE" in
   log_ratio_rm)
     reward_overrides=(
       reward_model.reward_manager=batch
-      custom_reward_function.path=/workspace/verl_FlowRL/verl/trainer/ppo/log_ratio_reward.py
+      custom_reward_function.path=$VERL_ROOT/verl/trainer/ppo/log_ratio_reward.py
       custom_reward_function.name=compute_score
       custom_reward_function.reward_kwargs.policy_model_path=$RM_POLICY_MODEL
       custom_reward_function.reward_kwargs.reference_model_path=$RM_REFERENCE_MODEL
@@ -418,8 +639,23 @@ case "$REWARD_MODE" in
       custom_reward_function.reward_kwargs.micro_batch_size=$RM_MICRO_BSZ
       custom_reward_function.reward_kwargs.device_map=$RM_DEVICE_MAP
       custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
+      ++custom_reward_function.reward_kwargs.attn_implementation=$RM_ATTN_IMPLEMENTATION
       custom_reward_function.reward_kwargs.offload_folder=$RM_OFFLOAD_FOLDER
       custom_reward_function.reward_kwargs.max_gpu_memory=$RM_MAX_GPU_MEMORY
+      custom_reward_function.reward_kwargs.normalize_by_length=True
+      custom_reward_function.reward_kwargs.online_train_with_rollout=$RM_ONLINE_TRAIN_BOOL
+      custom_reward_function.reward_kwargs.online_train_positive_jsonl=$RM_ONLINE_TRAIN_POSITIVE_JSONL
+      custom_reward_function.reward_kwargs.online_train_beta=$RM_ONLINE_TRAIN_BETA
+      custom_reward_function.reward_kwargs.online_train_length_normalize=$RM_ONLINE_TRAIN_LENGTH_NORMALIZE_BOOL
+      custom_reward_function.reward_kwargs.online_train_lr=$RM_ONLINE_TRAIN_LR
+      custom_reward_function.reward_kwargs.online_train_micro_batch_size=$RM_ONLINE_TRAIN_MICRO_BSZ
+      custom_reward_function.reward_kwargs.online_train_max_pairs=$RM_ONLINE_TRAIN_MAX_PAIRS
+      custom_reward_function.reward_kwargs.online_train_prompt_max_length=$RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH
+      custom_reward_function.reward_kwargs.online_train_updates_per_rollout_batch=$RM_ONLINE_TRAIN_UPDATES_PER_BATCH
+      custom_reward_function.reward_kwargs.online_train_use_dataparallel=$RM_ONLINE_TRAIN_USE_DATAPARALLEL_BOOL
+      custom_reward_function.reward_kwargs.online_train_rollout_minibatch_size=$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE
+      custom_reward_function.reward_kwargs.online_train_skip_warmup_data=$RM_ONLINE_TRAIN_SKIP_WARMUP_BOOL
+      +custom_reward_function.reward_kwargs.online_train_reference_from_policy=False
     )
     ;;
   *)
@@ -444,13 +680,20 @@ if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$LOG_RATIO_SAFE_MODE" = "1" ]; then
     )
 fi
 
+reward_async_num_workers=$REWARD_ASYNC_NUM_GPUS
+reward_async_num_gpus_per_worker=1
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$RM_ONLINE_TRAIN" = "1" ] && [ "$RM_ONLINE_TRAIN_SINGLE_WORKER" = "1" ]; then
+    reward_async_num_workers=1
+    reward_async_num_gpus_per_worker=$REWARD_ASYNC_NUM_GPUS
+fi
+
 option1_overrides=()
 if [ "$OPTION1_SPLIT_MODE" = "1" ]; then
     option1_overrides=(
         reward_model.launch_reward_fn_async=True
-        reward_model.reward_fn_async_num_workers=$REWARD_ASYNC_NUM_GPUS
-        reward_model.reward_fn_async_num_gpus=1
-        reward_model.reward_fn_async_num_cpus=1
+        reward_model.reward_fn_async_num_workers=$reward_async_num_workers
+        reward_model.reward_fn_async_num_gpus=$reward_async_num_gpus_per_worker
+        reward_model.reward_fn_async_num_cpus=$reward_async_num_cpus
         reward_model.reward_fn_async_warmup=True
         reward_model.reward_fn_async_warmup_timeout_s=600
         actor_rollout_ref.rollout.layered_summon=True
@@ -543,8 +786,8 @@ if [ "$MIN_MEM_MODE" = "1" ]; then
     if [ "$MIN_MEM_REWARD_GPU" = "1" ] && [ "$OPTION1_SPLIT_MODE" = "1" ] && [ "$REWARD_ASYNC_NUM_GPUS" -ge 1 ]; then
         minmem_overrides+=(
             reward_model.launch_reward_fn_async=True
-            reward_model.reward_fn_async_num_workers=$REWARD_ASYNC_NUM_GPUS
-            reward_model.reward_fn_async_num_gpus=1
+            reward_model.reward_fn_async_num_workers=$reward_async_num_workers
+            reward_model.reward_fn_async_num_gpus=$reward_async_num_gpus_per_worker
             reward_model.reward_fn_async_num_cpus=1
             reward_model.reward_fn_async_warmup=True
             reward_model.reward_fn_async_warmup_timeout_s=600
@@ -560,16 +803,29 @@ if [ "$MIN_MEM_MODE" = "1" ]; then
     fi
 fi
 
+USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-1}
+MODEL_USE_FUSED_KERNELS=False
+if [ "$USE_FUSED_KERNELS" = "1" ]; then
+    MODEL_USE_FUSED_KERNELS=True
+fi
+
 set -x
 echo "[INFO] REWARD_MODE=$REWARD_MODE LOG_RATIO_SAFE_MODE=$LOG_RATIO_SAFE_MODE TESTING_MODE=$TESTING_MODE MIN_MEM_MODE=$MIN_MEM_MODE MIN_MEM_REWARD_GPU=$MIN_MEM_REWARD_GPU"
 echo "[INFO] SINGLE_GPU_TEST_MODE=$SINGLE_GPU_TEST_MODE n_gpus_per_node=$n_gpus_per_node"
 echo "[INFO] OPTION1_SPLIT_MODE=$OPTION1_SPLIT_MODE ACTOR_ROLLOUT_GPUS=$n_gpus_per_node REWARD_ASYNC_NUM_GPUS=$REWARD_ASYNC_NUM_GPUS"
 echo "[INFO] TRAIN_BATCH_SIZE=$train_batch_size ROLLOUT_N=$rollout_n MAX_PROMPT_LENGTH=$max_prompt_length MAX_RESPONSE_LENGTH=$max_response_length ROLLOUT_GPU_MEMORY_UTIL=$rollout_gpu_memory_utilization ROLLOUT_MAX_NUM_SEQS=$rollout_max_num_seqs"
 echo "[INFO] ACTOR_PARAM_OFFLOAD=$actor_param_offload ACTOR_OPTIMIZER_OFFLOAD=$actor_optimizer_offload REF_PARAM_OFFLOAD=$ref_param_offload"
+echo "[INFO] USE_TORCH_COMPILE=$use_torch_compile FSDP_SYNC_MODULE_STATES=$fsdp_sync_module_states VERL_SKIP_MODEL_INIT_BARRIER=$skip_model_init_barrier DATALOADER_NUM_WORKERS=$dataloader_num_workers CPU_QUOTA=$cpu_quota REWARD_ASYNC_NUM_CPUS=$reward_async_num_cpus"
 echo "[INFO] RESUME_MODE=$resume_mode"
 echo "[INFO] USE_RULE_REWARD_FOR_EVAL=$use_rule_reward_for_eval"
 echo "[INFO] EVAL_FILES=$r1_test_path"
 echo "[INFO] LOGGER_MODE=$LOGGER_MODE WANDB_MODE=$WANDB_MODE VERL_WANDB_INIT_TIMEOUT=$VERL_WANDB_INIT_TIMEOUT"
+echo "[INFO] FSDP_PARAM_DTYPE=$FSDP_PARAM_DTYPE ROLLOUT_DTYPE=$ROLLOUT_DTYPE RM_TORCH_DTYPE=$RM_TORCH_DTYPE RM_ATTN_IMPLEMENTATION=$RM_ATTN_IMPLEMENTATION"
+echo "[INFO] ACTOR_PPO_MINI_BATCH_SIZE=$actor_ppo_mini_batch_size RM_BETA_INFER=$RM_BETA RM_ONLINE_TRAIN=$RM_ONLINE_TRAIN RM_TRAIN_BETA=$RM_ONLINE_TRAIN_BETA RM_TRAIN_LENGTH_NORMALIZE=$RM_ONLINE_TRAIN_LENGTH_NORMALIZE RM_TRAIN_PROMPT_MAX_LENGTH=$RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH RM_UPDATES_PER_BATCH=$RM_ONLINE_TRAIN_UPDATES_PER_BATCH RM_ROLLOUT_MINIBATCH_SIZE=$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE RM_SKIP_WARMUP=$RM_ONLINE_TRAIN_SKIP_WARMUP RM_USE_DATAPARALLEL=$RM_ONLINE_TRAIN_USE_DATAPARALLEL"
+echo "[INFO] REWARD_ASYNC_WORKERS=$reward_async_num_workers REWARD_ASYNC_GPUS_PER_WORKER=$reward_async_num_gpus_per_worker"
+echo "[INFO] USE_FUSED_KERNELS=$USE_FUSED_KERNELS (model.use_fused_kernels=$MODEL_USE_FUSED_KERNELS)"
+echo "[INFO] NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE NCCL_IB_DISABLE=$NCCL_IB_DISABLE NCCL_NVLS_ENABLE=$NCCL_NVLS_ENABLE NCCL_CUMEM_ENABLE=$NCCL_CUMEM_ENABLE"
+echo "[INFO] RAY_TMPDIR=$RAY_TMPDIR"
 echo "[INFO] Output dir: $OUTPUT_DIR"
 
 if [ "$RAY_CLEAN_START" = "1" ]; then
@@ -593,6 +849,7 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=$dapo_train_path \
     data.val_files=$r1_test_path \
     data.train_batch_size=$train_batch_size \
+    ++data.dataloader_num_workers=$dataloader_num_workers \
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.truncation='left' \
@@ -603,14 +860,24 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_fused_kernels=$MODEL_USE_FUSED_KERNELS \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.use_torch_compile=$use_torch_compile \
+    ++actor_rollout_ref.actor.fsdp_config.sync_module_states=$fsdp_sync_module_states \
+    ++actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=$FSDP_PARAM_DTYPE \
+    ++actor_rollout_ref.ref.fsdp_config.mixed_precision.param_dtype=$FSDP_PARAM_DTYPE \
+    ++critic.model.fsdp_config.sync_module_states=$fsdp_sync_module_states \
+    ++critic.model.fsdp_config.mixed_precision.param_dtype=$FSDP_PARAM_DTYPE \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.ref.use_torch_compile=$use_torch_compile \
+    ++actor_rollout_ref.ref.fsdp_config.sync_module_states=$fsdp_sync_module_states \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.rollout.dtype=$ROLLOUT_DTYPE \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$((max_prompt_length + max_response_length)) \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$actor_ppo_mini_batch_size \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.entropy_coeff=0 \

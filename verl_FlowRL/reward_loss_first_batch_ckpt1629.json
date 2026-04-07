@@ -1,0 +1,39 @@
+{
+  "data_path": "/proj/weitongzlab/projects/rm_training/generate/dapo_17k_merged_qwen3.jsonl",
+  "batch_size": 1,
+  "batch_index": 0,
+  "valid_row_start_index": 0,
+  "valid_row_end_index": 0,
+  "policy_model_path": "/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629",
+  "reference_model_path": "Qwen/Qwen3-1.7B-Base",
+  "tokenizer_path": "Qwen/Qwen3-1.7B-Base",
+  "data_source": "warmup",
+  "score_beta": 0.001,
+  "loss_beta": 0.001,
+  "r_max": 1.0,
+  "r_min": -1.0,
+  "reg_coef": 0.005,
+  "means": {
+    "mean_pred_pos": 0.36794073486328127,
+    "mean_pred_neg": -0.9768271484375001,
+    "mean_loss_pos": 0.19974945732258445,
+    "mean_loss_neg": 0.0002684905247688277,
+    "mean_loss_reg": 0.005447858311481347,
+    "mean_loss_total": 0.2054658061588346
+  },
+  "samples": [
+    {
+      "idx": 0,
+      "pred_pos": 0.36794073486328127,
+      "pred_neg": -0.9768271484375001,
+      "loss_pos": 0.19974945732258445,
+      "loss_neg": 0.0002684905247688277,
+      "loss_reg": 0.005447858311481347,
+      "loss_total": 0.2054658061588346,
+      "logp_pi_pos": -542.7839965820312,
+      "logp_ref_pos": -910.7247314453125,
+      "logp_pi_neg": -2155.01318359375,
+      "logp_ref_neg": -1178.18603515625
+    }
+  ]
+}

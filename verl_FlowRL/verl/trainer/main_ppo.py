@@ -29,6 +29,36 @@ def main(config):
     run_ppo(config)
 
 
+def _resolve_ray_temp_dir(config) -> str:
+    # Keep Ray base temp dir short to avoid AF_UNIX socket path overflow (107 bytes).
+    max_base_len = 27  # conservative: reserve ~80 chars for Ray session/socket suffix
+    configured = config.ray_init.get("temp_dir", None) if "ray_init" in config else None
+    candidates = [
+        configured,
+        os.environ.get("VERL_RAY_TMPDIR"),
+        os.environ.get("RAY_TMPDIR"),
+        f"/tmp/ray_{os.getuid()}",
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = os.path.abspath(os.path.expanduser(str(candidate)))
+        if len(path) > max_base_len:
+            print(f"[WARN] Skip Ray temp dir (too long for UNIX sockets): {path}")
+            continue
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            print(f"[WARN] Skip Ray temp dir (cannot create): {path} ({exc})")
+            continue
+        return path
+
+    fallback = "/tmp/ray"
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+
 def run_ppo(config) -> None:
     if not ray.is_initialized():
         runtime_env_vars = {
@@ -39,17 +69,30 @@ def run_ppo(config) -> None:
         }
         # Do not hardcode proxy settings. Inherit only when explicitly set in
         # the launcher environment.
-        for key in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"]:
+        for key in [
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+            "CUDA_HOME",
+            "CUDA_PATH",
+            "DS_SKIP_CUDA_CHECK",
+        ]:
             value = os.environ.get(key)
             if value:
                 runtime_env_vars[key] = value
 
-        ray.init(
-                    # address="auto",
-                    runtime_env={
-                        "env_vars": runtime_env_vars
-                        },
-                )
+        ray_init_kwargs = {
+            # address="auto",
+            "_temp_dir": _resolve_ray_temp_dir(config),
+            "runtime_env": {"env_vars": runtime_env_vars},
+        }
+        if config.ray_init.get("num_cpus", None) is not None:
+            ray_init_kwargs["num_cpus"] = config.ray_init.num_cpus
+        ray.init(**ray_init_kwargs)
+        print(f"[INFO] Ray temp dir: {ray_init_kwargs['_temp_dir']}")
 
     print("[INFO] ✅ Ray has been initialized")
     print("[INFO] Available resources:")

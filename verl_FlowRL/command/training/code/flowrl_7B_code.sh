@@ -1,4 +1,7 @@
 #!/bin/bash
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_${USER}}
+mkdir -p "$RAY_TMPDIR"
 
 PRETRAINED_MODEL=../pre_trained_model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
 n_nodes=1

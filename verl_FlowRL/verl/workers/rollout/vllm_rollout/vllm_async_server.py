@@ -28,7 +28,11 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
-from vllm.worker.worker_base import WorkerWrapperBase
+try:
+    from vllm.worker.worker_base import WorkerWrapperBase
+except ImportError:
+    # vLLM >= 0.17 moved worker modules under vllm.v1.worker.
+    from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.async_server import AsyncServerBase

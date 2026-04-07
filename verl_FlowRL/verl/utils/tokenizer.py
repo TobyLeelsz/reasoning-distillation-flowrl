@@ -13,6 +13,8 @@
 # limitations under the License.
 """Utils for tokenization."""
 
+import json
+import os
 import warnings
 
 __all__ = ["hf_tokenizer", "hf_processor"]
@@ -55,7 +57,43 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         warnings.warn("Found gemma-2-2b-it tokenizer. Set eos_token and eos_token_id to <end_of_turn> and 107.", stacklevel=1)
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
-    tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    tokenizer_kwargs = dict(kwargs)
+
+    # Compatibility shim: older transformers builds expect extra_special_tokens
+    # to be a dict, while some tokenizer_config.json files store it as a list.
+    config_path = os.path.join(str(name_or_path), "tokenizer_config.json")
+    if os.path.isfile(config_path) and "extra_special_tokens" not in tokenizer_kwargs:
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_obj = json.load(f)
+            extra_special_tokens = config_obj.get("extra_special_tokens")
+            if isinstance(extra_special_tokens, list):
+                tokenizer_kwargs["extra_special_tokens"] = {f"extra_special_token_{i}": tok for i, tok in enumerate(extra_special_tokens)}
+                warnings.warn(
+                    "Loaded tokenizer_config.json with list-valued extra_special_tokens; "
+                    "converting to dict for transformers compatibility.",
+                    stacklevel=1,
+                )
+        except Exception:
+            # Fall through to normal loading if tokenizer config cannot be parsed.
+            pass
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(name_or_path, **tokenizer_kwargs)
+    except AttributeError as exc:
+        msg = str(exc)
+        if "list" in msg and "keys" in msg and "extra_special_tokens" not in tokenizer_kwargs:
+            retry_kwargs = dict(tokenizer_kwargs)
+            retry_kwargs["extra_special_tokens"] = {}
+            warnings.warn(
+                "Retrying tokenizer load with empty extra_special_tokens due to "
+                "transformers compatibility issue.",
+                stacklevel=1,
+            )
+            tokenizer = AutoTokenizer.from_pretrained(name_or_path, **retry_kwargs)
+        else:
+            raise
+
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer

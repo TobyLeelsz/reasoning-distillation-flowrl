@@ -363,6 +363,13 @@ def _add_reward_component_stats(metrics: dict, reward_extra_infos_dict: dict[str
     component_to_prefix = {
         "rule_reward": "reward/rule_reward",
         "log_ratio_reward": "reward/log_ratio_reward",
+        "online_rm_loss": "reward/online_rm_loss",
+        "online_rm_loss_pre_update": "reward/online_rm_loss_pre_update",
+        "online_rm_loss_mean_updates": "reward/online_rm_loss_mean_updates",
+        "online_rm_loss_last": "reward/online_rm_loss_last",
+        "online_rm_pairs": "reward/online_rm_pairs",
+        "online_rm_updates_per_batch_actual": "reward/online_rm_updates_per_batch_actual",
+        "online_rm_updates_per_batch_target": "reward/online_rm_updates_per_batch_target",
     }
     for component_key, metric_prefix in component_to_prefix.items():
         values = _extract_finite_float_values(reward_extra_infos_dict.get(component_key))

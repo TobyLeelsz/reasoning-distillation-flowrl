@@ -97,6 +97,21 @@ def get_sharding_strategy(device_mesh):
     return sharding_strategy
 
 
+def _resolve_attn_implementation(use_fused_kernels: bool) -> str:
+    if not use_fused_kernels:
+        return "eager"
+    try:
+        import flash_attn  # noqa: F401
+
+        return "flash_attention_2"
+    except Exception as exc:
+        warnings.warn(
+            f"flash-attn unavailable ({exc}); falling back to eager attention.",
+            stacklevel=1,
+        )
+        return "eager"
+
+
 class ProjZModule(torch.nn.Module):
     def __init__(self, hidden_size: int, num_layers: int = 3, dropout: float = 0.1):
         super().__init__()
@@ -227,7 +242,11 @@ class ActorRolloutRefWorker(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
+        actor_model_config = AutoConfig.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            attn_implementation=_resolve_attn_implementation(use_fused_kernels),
+        )
                 
         # patch for kimi-vl
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
@@ -319,7 +338,12 @@ class ActorRolloutRefWorker(Worker):
                     'bias': "none"
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
-        torch.distributed.barrier()
+        skip_model_init_barrier = int(os.getenv("VERL_SKIP_MODEL_INIT_BARRIER", "0"))
+        if skip_model_init_barrier:
+            if self.rank == 0:
+                logger.warning("Skipping model-init barrier because VERL_SKIP_MODEL_INIT_BARRIER=1")
+        else:
+            torch.distributed.barrier()
 
         if self.rank == 0:
             print_model_size(actor_module)
@@ -349,6 +373,8 @@ class ActorRolloutRefWorker(Worker):
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        sync_module_states = fsdp_config.get("sync_module_states", True)
+        sync_module_states = fsdp_config.get("sync_module_states", True)
 
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
@@ -371,7 +397,7 @@ class ActorRolloutRefWorker(Worker):
                     device_id=get_torch_device().current_device(),
                     sharding_strategy=sharding_strategy,  # zero3
                     mixed_precision=mixed_precision,
-                    sync_module_states=True,
+                    sync_module_states=sync_module_states,
                     device_mesh=self.device_mesh,
                     forward_prefetch=False,
                     **fsdp_extra_kwargs,
@@ -389,7 +415,7 @@ class ActorRolloutRefWorker(Worker):
                     device_id=get_torch_device().current_device(),
                     sharding_strategy=sharding_strategy,  # zero3
                     mixed_precision=mixed_precision,
-                    sync_module_states=True,
+                    sync_module_states=sync_module_states,
                     device_mesh=self.device_mesh,
                     forward_prefetch=False,
                 )
@@ -940,7 +966,11 @@ class CriticWorker(Worker):
 
         from transformers import AutoConfig, AutoModelForTokenClassification
 
-        critic_model_config = AutoConfig.from_pretrained(local_path, attn_implementation="flash_attention_2", trust_remote_code=config.model.get("trust_remote_code", False))
+        critic_model_config = AutoConfig.from_pretrained(
+            local_path,
+            attn_implementation=_resolve_attn_implementation(config.model.get("use_fused_kernels", False)),
+            trust_remote_code=config.model.get("trust_remote_code", False),
+        )
         critic_model_config.num_labels = 1
         # patch for kimi-vl
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
@@ -1021,7 +1051,7 @@ class CriticWorker(Worker):
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,
                 mixed_precision=mixed_precision,
-                sync_module_states=True,
+                sync_module_states=sync_module_states,
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,
                 cpu_offload=None,
@@ -1264,7 +1294,7 @@ class RewardModelWorker(Worker):
                 pretrained_model_name_or_path=local_path,
                 config=model_config,
                 torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
+                attn_implementation=_resolve_attn_implementation(config.model.get("use_fused_kernels", False)),
                 trust_remote_code=trust_remote_code,
             )
 
@@ -1280,6 +1310,7 @@ class RewardModelWorker(Worker):
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        sync_module_states = config.model.fsdp_config.get("sync_module_states", True)
 
         if config.strategy == "fsdp":
             reward_module = FSDP(
@@ -1289,7 +1320,7 @@ class RewardModelWorker(Worker):
                 auto_wrap_policy=auto_wrap_policy,
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,  # zero3
-                sync_module_states=True,
+                sync_module_states=sync_module_states,
                 cpu_offload=CPUOffload(offload_params=True),
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,
@@ -1317,7 +1348,10 @@ class RewardModelWorker(Worker):
 
     def _forward_micro_batch(self, micro_batch):
         if is_cuda_available:
-            from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+            try:
+                from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+            except Exception:
+                from transformers.integrations.npu_flash_attention import pad_input, unpad_input, rearrange, index_first_axis
         elif is_npu_available:
             from transformers.integrations.npu_flash_attention import pad_input, unpad_input, rearrange, index_first_axis
 

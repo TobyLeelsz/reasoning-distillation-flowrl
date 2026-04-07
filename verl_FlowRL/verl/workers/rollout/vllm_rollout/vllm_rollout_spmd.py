@@ -28,6 +28,7 @@ When working with Megatron:
 
 import logging
 import os
+import inspect
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any, Dict, List, Union
@@ -39,7 +40,11 @@ from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
-from vllm.worker.worker_base import WorkerWrapperBase
+try:
+    from vllm.worker.worker_base import WorkerWrapperBase
+except ImportError:
+    # vLLM >= 0.17 moved worker modules under vllm.v1.worker.
+    from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 from verl import DataProto
 from verl.third_party.vllm import vllm_version
@@ -55,6 +60,24 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
 # 3. simplify init logics
+
+
+def _prune_llm_init_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop kwargs unsupported by the installed vLLM API."""
+    try:
+        llm_allowed = {k for k in inspect.signature(LLM.__init__).parameters.keys() if k != "self"}
+        from vllm.engine.arg_utils import EngineArgs
+
+        engine_allowed = {k for k in inspect.signature(EngineArgs.__init__).parameters.keys() if k != "self"}
+        allowed = llm_allowed | engine_allowed
+        pruned = {k: v for k, v in kwargs.items() if k in allowed}
+        dropped = [k for k in kwargs.keys() if k not in allowed]
+        if dropped:
+            logger.warning("Drop unsupported vLLM kwargs: %s", dropped)
+        return pruned
+    except Exception:
+        # If signature probing fails, keep original kwargs and let vLLM raise.
+        return kwargs
 
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
@@ -147,7 +170,7 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
-        self.inference_engine = LLM(
+        llm_init_kwargs = dict(
             model=model_path,
             enable_sleep_mode=True,
             tensor_parallel_size=tensor_parallel_size,
@@ -170,6 +193,24 @@ class vLLMRollout(BaseRollout):
             **lora_kwargs,
             **engine_kwargs,
         )
+        llm_init_kwargs = _prune_llm_init_kwargs(llm_init_kwargs)
+        try:
+            self.inference_engine = LLM(**llm_init_kwargs)
+        except AttributeError as exc:
+            msg = str(exc)
+            if "list" in msg and "keys" in msg:
+                # Some tokenizer_config.json files encode extra_special_tokens as a
+                # list, which can break older transformers APIs used in vLLM's
+                # internal tokenizer initialization path.
+                retry_kwargs = dict(llm_init_kwargs)
+                retry_kwargs["skip_tokenizer_init"] = True
+                logger.warning(
+                    "Retry vLLM init with skip_tokenizer_init=True due to tokenizer "
+                    "extra_special_tokens compatibility issue."
+                )
+                self.inference_engine = LLM(**retry_kwargs)
+            else:
+                raise
 
         # Offload vllm model to reduce peak memory usage
         self.inference_engine.sleep(level=1)

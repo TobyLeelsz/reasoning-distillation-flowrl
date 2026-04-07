@@ -239,7 +239,7 @@ custom_reward_function:
   path: /workspace/verl_FlowRL/verl/trainer/ppo/log_ratio_reward.py
   name: compute_score
   reward_kwargs:
-    policy_model_path: /workspace/checkpoints/checkpoint-800
+    policy_model_path: /proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629
     reference_model_path: ${actor_rollout_ref.model.path}
     tokenizer_path: ${actor_rollout_ref.model.path}
     beta: 2.0 # 0.001
@@ -259,6 +259,24 @@ custom_reward_function:
     max_seq_len: null
     normalize_by_length: True
     clear_cuda_cache: False
+    online_train_with_rollout: False
+    online_train_positive_jsonl: null
+    online_train_beta: 0.001
+    online_train_length_normalize: False
+    online_train_lr: 5.0e-7
+    online_train_weight_decay: 0.0
+    online_train_micro_batch_size: 1
+    online_train_max_pairs: 8
+    online_train_r_max: 1.0
+    online_train_r_min: -1.0
+    online_train_reg_coef: 0.005
+    online_train_grad_clip: 1.0
+    online_train_prompt_max_length: ${data.max_prompt_length}
+    online_train_seed: 42
+    online_train_updates_per_rollout_batch: 1
+    online_train_use_dataparallel: True
+    online_train_rollout_minibatch_size: null
+    online_train_skip_warmup_data: False
 
 algorithm:
   gamma: 1.0
@@ -307,3 +325,4 @@ trainer:
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  temp_dir: null # Optional short path for Ray local runtime files, e.g. /tmp/ray_${USER}

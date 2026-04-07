@@ -26,6 +26,8 @@ from verl.utils.reward_score import default_compute_score
 
 PROMPT_TOKEN_IDS_KEY = "__verl_prompt_token_ids"
 RESPONSE_TOKEN_IDS_KEY = "__verl_response_token_ids"
+PROMPT_TEXT_KEY = "__verl_prompt_text"
+RESPONSE_TEXT_KEY = "__verl_response_text"
 _CUSTOM_REWARD_FN_CACHE = {}
 
 
@@ -126,7 +128,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     return reward_manager
 
 
-def _attach_prompt_response_token_ids_to_extra_info(data: DataProto):
+def _attach_prompt_response_token_ids_to_extra_info(data: DataProto, tokenizer=None):
     if "prompts" not in data.batch or "responses" not in data.batch or "attention_mask" not in data.batch:
         return
 
@@ -150,8 +152,28 @@ def _attach_prompt_response_token_ids_to_extra_info(data: DataProto):
         valid_prompt_len = int(valid_prompt_lengths[i].item())
         valid_response_len = int(valid_response_lengths[i].item())
 
-        merged_extra_info[PROMPT_TOKEN_IDS_KEY] = prompt_ids[i][-valid_prompt_len:].detach().cpu().tolist()
-        merged_extra_info[RESPONSE_TOKEN_IDS_KEY] = response_ids[i][:valid_response_len].detach().cpu().tolist()
+        valid_prompt_token_ids = prompt_ids[i][-valid_prompt_len:].detach().cpu().tolist()
+        valid_response_token_ids = response_ids[i][:valid_response_len].detach().cpu().tolist()
+
+        merged_extra_info[PROMPT_TOKEN_IDS_KEY] = valid_prompt_token_ids
+        merged_extra_info[RESPONSE_TOKEN_IDS_KEY] = valid_response_token_ids
+
+        if tokenizer is not None:
+            try:
+                merged_extra_info[PROMPT_TEXT_KEY] = tokenizer.decode(
+                    valid_prompt_token_ids,
+                    skip_special_tokens=False,
+                )
+            except Exception:
+                pass
+            try:
+                merged_extra_info[RESPONSE_TEXT_KEY] = tokenizer.decode(
+                    valid_response_token_ids,
+                    skip_special_tokens=False,
+                )
+            except Exception:
+                pass
+
         merged_extra_infos.append(merged_extra_info)
 
     data.non_tensor_batch["extra_info"] = np.array(merged_extra_infos, dtype=object)
@@ -167,16 +189,15 @@ def compute_reward(data: DataProto, reward_fn):
         Tuple of reward tensor and extra info dictionary.
     """
     if getattr(reward_fn, "uses_custom_reward_fn", False):
-        _attach_prompt_response_token_ids_to_extra_info(data)
+        _attach_prompt_response_token_ids_to_extra_info(data, tokenizer=getattr(reward_fn, "tokenizer", None))
 
     try:
         reward_result = reward_fn(data, return_dict=True)
         reward_tensor = reward_result["reward_tensor"]
         reward_extra_infos_dict = reward_result["reward_extra_info"]
     except Exception as e:
-        print(f"Error in reward_fn: {e}")
-        reward_tensor = reward_fn(data)
-        reward_extra_infos_dict = {}
+        print(f"Error in reward_fn (no retry): {e}")
+        raise
 
     return reward_tensor, reward_extra_infos_dict
 
