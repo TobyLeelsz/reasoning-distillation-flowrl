@@ -1684,33 +1684,20 @@ class LogRatioRewardScorer:
                     ground_truth=ground_truth,
                     extra_info=extra_info,
                 )
-            rule_reward = _extract_scalar_score(rule_reward_raw)
+            rule_reward_scalar = _extract_scalar_score(rule_reward_raw)
+            rule_reward = 1.0 if rule_reward_scalar > 0.0 else -1.0
 
-            # Requested composition:
-            # 1) if log_ratio_reward < 0: score = rule + log_ratio_reward
-            # 2) if log_ratio_reward >= 0:
-            #    - rule == 1  -> score = 1 + log_ratio_reward
-            #    - rule == -1 -> score = -1 (equivalent to 0 + (-1))
-            #    - otherwise  -> score = rule + log_ratio_reward
             log_ratio_reward = float(reward.item())
             if not math.isfinite(log_ratio_reward):
                 log_ratio_reward = 0.0
-            if self.log_ratio_reward_clip_min is not None and math.isfinite(log_ratio_reward):
-                log_ratio_reward = max(log_ratio_reward, self.log_ratio_reward_clip_min)
 
-            if log_ratio_reward < 0.0:
-                raw_reward_val = log_ratio_reward + rule_reward
-            else:
-                if rule_reward == -1.0:
-                    raw_reward_val = -1.0
-                elif rule_reward == 1.0:
-                    raw_reward_val = 1.0 + log_ratio_reward
-                else:
-                    raw_reward_val = log_ratio_reward + rule_reward
+            # Strict binary log-ratio reward.
+            log_ratio_reward = 1.0 if log_ratio_reward > 0.0 else -1.0
+
+            # Direct composition as requested.
+            raw_reward_val = rule_reward + log_ratio_reward
 
             reward_val = raw_reward_val
-            if self.reward_clip_min is not None and math.isfinite(reward_val):
-                reward_val = max(reward_val, self.reward_clip_min)
             if not math.isfinite(reward_val):
                 reward_val = 0.0
             results.append(

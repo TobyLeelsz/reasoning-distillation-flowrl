@@ -16,14 +16,15 @@ set -euo pipefail
 PROJECT_ROOT="/proj/weitongzlab/projects/reasoning-distillation-flowrl"
 FLOWRL_ROOT="${PROJECT_ROOT}/verl_FlowRL"
 TRAIN_SCRIPT="${FLOWRL_ROOT}/command/training/math/flowrl_7B_math.sh"
-BASE_POLICY_MODEL="${PROJECT_ROOT}/downloads/Qwen/sft-dapo-17k-qwen3-1.7b"
+BASE_POLICY_MODEL="Qwen/Qwen3-1.7B-Base"
 REWARD_MODEL="/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629"
 ALIGNED_MATH_TRAIN_PATH="${PROJECT_ROOT}/data/math_data/dapo-math-17k.prompt_aligned_with_dapo17k_rm.parquet"
 BASE_MATH_TRAIN_PATH="${PROJECT_ROOT}/data/math_data/dapo-math-17k.parquet"
 
 if [ "$#" -eq 0 ]; then
-    # Default launch profile; override by passing args to sbatch.
-    set -- restart-2rollout-2reward
+    # Default launch profile: use all visible GPUs for actor/rollout
+    # (no dedicated reward-GPU split). Override by passing args to sbatch.
+    set --
 fi
 
 source /nas/longleaf/home/shangzhe/anaconda3/etc/profile.d/conda.sh
@@ -43,12 +44,14 @@ export RM_TOKENIZER_PATH="${BASE_POLICY_MODEL}"
 export RM_POLICY_MODEL="${REWARD_MODEL}"
 export MODEL_TAG="qwen3_1p7b"
 export MODEL_SIZE_DIR="1.7B"
+export REWARD_MODE="${REWARD_MODE:-log_ratio_rm}"
+export OPTION1_SPLIT_MODE="${OPTION1_SPLIT_MODE:-0}"
 
-# Keep rollout prompts aligned with online RM positive prompts by default.
-if [ -f "${ALIGNED_MATH_TRAIN_PATH}" ]; then
-    export FLOWRL_MATH_TRAIN_PATH="${FLOWRL_MATH_TRAIN_PATH:-${ALIGNED_MATH_TRAIN_PATH}}"
-else
-    export FLOWRL_MATH_TRAIN_PATH="${FLOWRL_MATH_TRAIN_PATH:-${BASE_MATH_TRAIN_PATH}}"
+# Force aligned training parquet for chi-squared positive-pool prompt matching.
+export FLOWRL_MATH_TRAIN_PATH="${FLOWRL_MATH_TRAIN_PATH:-${ALIGNED_MATH_TRAIN_PATH}}"
+if [ ! -f "${FLOWRL_MATH_TRAIN_PATH}" ]; then
+    echo "[$(date)] ERROR: training parquet not found: ${FLOWRL_MATH_TRAIN_PATH}"
+    exit 1
 fi
 
 export VERL_LOG_RATIO_REWARD_VERBOSE=1

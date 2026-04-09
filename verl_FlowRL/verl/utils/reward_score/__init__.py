@@ -14,27 +14,19 @@
 # from . import gsm8k, math, prime_math, prime_code
 
 from verl.utils.import_utils import deprecated
-from rllm.rewards.code_reward import rllm_reward_fn_code 
+from rllm.rewards.code_reward import rllm_reward_fn_code
 from rllm.rewards.rl_reward import rllm_reward_fn
 
 
-def default_compute_score(data_source, solution_str, ground_truth, extra_info=None, sandbox_fusion_url=None, concurrent_semaphore=None):
-    """Compute the score for a given solution based on the data source.
-
-    Args:
-        data_source (str): The source dataset identifier which determines the scoring method.
-        solution_str (str): The solution string to be evaluated.
-        ground_truth (str): The ground truth answer for comparison.
-        extra_info (dict, optional): Additional information that might be needed for scoring. Defaults to None.
-
-    Returns:
-        float: The computed score as a floating point number. If the result is a dictionary,
-               it returns the dictionary instead.
-
-    Raises:
-        NotImplementedError: If the reward function is not implemented for the given data source.
-    """
-
+def _default_compute_score_single(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+):
+    """Single-sample reward scoring."""
     if data_source == "openai/gsm8k":
         from . import gsm8k
 
@@ -102,6 +94,64 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         return float(res)
     else:
         return float(res[0])
+
+
+def default_compute_score(
+    data_source=None,
+    solution_str=None,
+    ground_truth=None,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+    data_sources=None,
+    solution_strs=None,
+    ground_truths=None,
+    extra_infos=None,
+    **_,
+):
+    """Compute reward score(s) for one sample or for a batch.
+
+    Supports both call styles:
+    - single-item: (data_source, solution_str, ground_truth, ...)
+    - batched: (data_sources=[...], solution_strs=[...], ground_truths=[...], ...)
+    """
+    if data_sources is not None or solution_strs is not None or ground_truths is not None:
+        if data_sources is None or solution_strs is None or ground_truths is None:
+            raise ValueError("Batched scoring requires data_sources, solution_strs, and ground_truths.")
+
+        data_sources = list(data_sources)
+        solution_strs = list(solution_strs)
+        ground_truths = list(ground_truths)
+        if not (len(data_sources) == len(solution_strs) == len(ground_truths)):
+            raise ValueError("data_sources, solution_strs, and ground_truths must have the same length.")
+
+        if extra_infos is None:
+            extra_infos = [None] * len(data_sources)
+        else:
+            extra_infos = list(extra_infos)
+            if len(extra_infos) != len(data_sources):
+                raise ValueError("extra_infos must have the same length as data_sources.")
+
+        return [
+            _default_compute_score_single(
+                data_source=ds,
+                solution_str=sol,
+                ground_truth=gt,
+                extra_info=ei,
+                sandbox_fusion_url=sandbox_fusion_url,
+                concurrent_semaphore=concurrent_semaphore,
+            )
+            for ds, sol, gt, ei in zip(data_sources, solution_strs, ground_truths, extra_infos)
+        ]
+
+    return _default_compute_score_single(
+        data_source=data_source,
+        solution_str=solution_str,
+        ground_truth=ground_truth,
+        extra_info=extra_info,
+        sandbox_fusion_url=sandbox_fusion_url,
+        concurrent_semaphore=concurrent_semaphore,
+    )
 
 
 @deprecated("verl.utils.reward_score.default_compute_score")

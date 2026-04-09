@@ -355,11 +355,28 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
 
+        available_batch_keys = set(data.batch.keys())
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        if "ref_log_prob" in available_batch_keys:
+            select_keys.append("ref_log_prob")
+        elif self.config.use_kl_loss:
+            raise RuntimeError("`ref_log_prob` is required but missing from actor update batch.")
+        if "rule_reward" in available_batch_keys:
+            select_keys.append("rule_reward")
+        if "token_level_rewards" in available_batch_keys:
+            select_keys.append("token_level_rewards")
+        for chi_key in (
+            "chi_pos_input_ids",
+            "chi_pos_attention_mask",
+            "chi_pos_position_ids",
+            "chi_pos_responses",
+            "chi_pos_response_mask",
+            "chi_pos_ref_log_prob",
+        ):
+            if chi_key in available_batch_keys:
+                select_keys.append(chi_key)
         if multi_turn:
             select_keys.append("loss_mask")
-        if self.config.use_kl_loss:
-            select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -406,7 +423,7 @@ class DataParallelPPOActor(BasePPOActor):
                         response_mask = attention_mask[:, -response_length:]
 
                     old_log_prob = data["old_log_probs"]
-                    advantages = data["advantages"]
+                    ref_log_prob = data["ref_log_prob"] if "ref_log_prob" in data else old_log_prob
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
@@ -421,15 +438,83 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy = True
                     entropy, log_prob, log_z = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, return_log_z=True)
 
-                    # Compute FlowRL objective
-                    policy_loss, data = self.compute_flowrl_objective(
+                    # Build current reward from current policy and detach log(pi) inside reward used by flow loss.
+                    flow_reward, _, _ = self._compute_current_flow_reward(
                         logpf=log_prob,
-                        logf_ref=data['ref_log_prob'],
+                        logf_ref=ref_log_prob,
+                        response_mask=response_mask,
+                        sample_data=data,
+                    )
+
+                    flow_loss, flow_metrics = self.compute_flowrl_objective(
+                        logpf=log_prob,
+                        logf_ref=ref_log_prob,
                         logpf_old=old_log_prob,
                         log_z=log_z,
-                        reward=advantages,
+                        reward=flow_reward,
                         response_mask=response_mask,
-                        clip_ratio=self.config.clip_ratio
+                        clip_ratio=self.config.clip_ratio,
+                    )
+
+                    chi_squared_loss_coef = float(self.config.get("chi_squared_loss_coef", 1.0))
+                    chi_required = bool(self.config.get("chi_squared_require_positive_batch", True))
+                    has_chi_positive_batch = all(
+                        key in data
+                        for key in (
+                            "chi_pos_input_ids",
+                            "chi_pos_attention_mask",
+                            "chi_pos_position_ids",
+                            "chi_pos_responses",
+                            "chi_pos_response_mask",
+                            "chi_pos_ref_log_prob",
+                        )
+                    )
+                    if chi_squared_loss_coef != 0.0 and not has_chi_positive_batch and chi_required:
+                        raise RuntimeError(
+                            "chi-squared loss is enabled but chi positive batch is missing. "
+                            "Expected chi_pos_* tensors from trainer."
+                        )
+
+                    if chi_squared_loss_coef != 0.0 and has_chi_positive_batch:
+                        pos_micro_batch = {
+                            "input_ids": data["chi_pos_input_ids"],
+                            "attention_mask": data["chi_pos_attention_mask"],
+                            "position_ids": data["chi_pos_position_ids"],
+                            "responses": data["chi_pos_responses"],
+                        }
+                        _, pos_log_prob = self._forward_micro_batch(
+                            micro_batch=pos_micro_batch,
+                            temperature=temperature,
+                            calculate_entropy=False,
+                            return_log_z=False,
+                        )
+                        chi_squared_loss, chi_metrics = self._compute_chi_squared_loss(
+                            pos_logpf=pos_log_prob,
+                            pos_logf_ref=data["chi_pos_ref_log_prob"],
+                            pos_response_mask=data["chi_pos_response_mask"],
+                            neg_logpf=log_prob,
+                            neg_logf_ref=ref_log_prob,
+                            neg_response_mask=response_mask,
+                        )
+                    else:
+                        chi_squared_loss = flow_loss.new_zeros(())
+                        chi_metrics = {
+                            "actor/chi_squared_loss": 0.0,
+                            "actor/chi_squared_loss_pos": 0.0,
+                            "actor/chi_squared_loss_neg": 0.0,
+                            "actor/chi_squared_loss_reg": 0.0,
+                            "actor/chi_lratio_pos": 0.0,
+                            "actor/chi_lratio_neg": 0.0,
+                        }
+
+                    policy_loss = flow_loss + chi_squared_loss_coef * chi_squared_loss
+
+                    flow_metrics.update(chi_metrics)
+                    flow_metrics.update(
+                        {
+                            "actor/chi_squared_loss_coef": chi_squared_loss_coef,
+                            "actor/final_loss": policy_loss.detach().item(),
+                        }
                     )
 
                     # pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
@@ -476,7 +561,7 @@ class DataParallelPPOActor(BasePPOActor):
                     #     "actor/ppo_kl": ppo_kl.detach().item(),
                     #     "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     # }
-                    append_to_dict(metrics, data)
+                    append_to_dict(metrics, flow_metrics)
 
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
@@ -484,18 +569,112 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.zero_grad()
         return metrics
 
+    def _compute_current_flow_reward(
+        self,
+        logpf: torch.Tensor,
+        logf_ref: torch.Tensor,
+        response_mask: torch.Tensor,
+        sample_data: dict,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        chi_squared_beta = float(self.config.get("chi_squared_beta", 0.001))
+        flow_reward_clip_min = self.config.get("flow_reward_clip_min", None)
+
+        current_log_ratio = verl_F.masked_mean(logpf - logf_ref, response_mask, axis=1)
+
+        if "rule_reward" in sample_data:
+            rule_reward = sample_data["rule_reward"]
+        elif "token_level_rewards" in sample_data:
+            token_level_rewards = sample_data["token_level_rewards"]
+            if token_level_rewards.ndim == 1:
+                rule_reward = token_level_rewards
+            else:
+                rule_reward = verl_F.masked_sum(token_level_rewards, response_mask, axis=1)
+        else:
+            # Fall back to provided advantages if explicit rule reward is unavailable.
+            if sample_data["advantages"].ndim == 1:
+                rule_reward = sample_data["advantages"]
+            else:
+                rule_reward = verl_F.masked_mean(sample_data["advantages"], response_mask, axis=1)
+
+        rule_reward = rule_reward.to(device=current_log_ratio.device, dtype=current_log_ratio.dtype)
+        flow_reward = rule_reward + chi_squared_beta * current_log_ratio.detach()
+
+        if flow_reward_clip_min is not None:
+            flow_reward = torch.clamp_min(flow_reward, float(flow_reward_clip_min))
+
+        return flow_reward, current_log_ratio, rule_reward
+
+    def _compute_chi_squared_loss(
+        self,
+        pos_logpf: torch.Tensor,
+        pos_logf_ref: torch.Tensor,
+        pos_response_mask: torch.Tensor,
+        neg_logpf: torch.Tensor,
+        neg_logf_ref: torch.Tensor,
+        neg_response_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, dict]:
+        # Match chi_squared_rm.py:
+        #   0.5 * (beta * log(pi/pi_ref)(y+) - r_max)^2
+        # + 0.5 * (beta * log(pi/pi_ref)(y-) - r_min)^2
+        # + reg_coef * ((beta * log(pi/pi_ref)(y+))^2 + (beta * log(pi/pi_ref)(y-))^2)
+        chi_squared_beta = float(self.config.get("chi_squared_beta", 0.001))
+        chi_squared_reg_coef = float(self.config.get("chi_squared_reg_coef", 0.005))
+        chi_squared_r_max = float(self.config.get("chi_squared_r_max", 1.0))
+        chi_squared_r_min = float(self.config.get("chi_squared_r_min", -1.0))
+
+        pos_response_mask = pos_response_mask.to(device=pos_logpf.device, dtype=pos_logpf.dtype)
+        neg_response_mask = neg_response_mask.to(device=neg_logpf.device, dtype=neg_logpf.dtype)
+        pos_logf_ref = pos_logf_ref.to(device=pos_logpf.device, dtype=pos_logpf.dtype)
+        neg_logf_ref = neg_logf_ref.to(device=neg_logpf.device, dtype=neg_logpf.dtype)
+
+        logp_pi_pos = verl_F.masked_sum(pos_logpf, pos_response_mask, axis=1)
+        logp_ref_pos = verl_F.masked_sum(pos_logf_ref, pos_response_mask, axis=1)
+        logp_pi_neg = verl_F.masked_sum(neg_logpf, neg_response_mask, axis=1)
+        logp_ref_neg = verl_F.masked_sum(neg_logf_ref, neg_response_mask, axis=1)
+
+        lr_pos = logp_pi_pos - logp_ref_pos
+        lr_neg = logp_pi_neg - logp_ref_neg
+
+        pred_pos = chi_squared_beta * lr_pos
+        pred_neg = chi_squared_beta * lr_neg
+
+        loss_pos = 0.5 * (pred_pos - chi_squared_r_max).pow(2)
+        loss_neg = 0.5 * (pred_neg - chi_squared_r_min).pow(2)
+        loss_reg = chi_squared_reg_coef * (pred_pos.pow(2) + pred_neg.pow(2))
+        chi_squared_loss = (loss_pos + loss_neg + loss_reg).mean()
+
+        chi_metrics = {
+            "actor/chi_squared_loss": chi_squared_loss.detach().item(),
+            "actor/chi_squared_loss_pos": loss_pos.mean().detach().item(),
+            "actor/chi_squared_loss_neg": loss_neg.mean().detach().item(),
+            "actor/chi_squared_loss_reg": loss_reg.mean().detach().item(),
+            "actor/chi_squared_beta": chi_squared_beta,
+            "actor/chi_squared_reg_coef": chi_squared_reg_coef,
+            "actor/chi_squared_r_max": chi_squared_r_max,
+            "actor/chi_squared_r_min": chi_squared_r_min,
+            "actor/chi_lratio_pos": lr_pos.detach().mean().item(),
+            "actor/chi_lratio_neg": lr_neg.detach().mean().item(),
+        }
+        return chi_squared_loss, chi_metrics
+
     def compute_flowrl_objective(self, logpf=None, logf_ref=None,  logpf_old=None, log_z=None, reward=None, response_mask=None, clip_ratio=None):
 
         log_z = log_z.squeeze(-1)
-        B = log_z.shape[0]
 
         # mean of log p_f / log p_ref over valid tokens
         avg_logpf = verl_F.masked_mean(logpf, response_mask, axis=1)
         avg_logp_ref = verl_F.masked_mean(logf_ref, response_mask, axis=1)
 
-        # mean of token-level reward → log
-        # we set R = exp(advantage); then log_reward = advantage
-        seq_log_reward = verl_F.masked_mean(reward, response_mask, axis=1) 
+        if reward.ndim == 1:
+            seq_log_reward = reward
+        elif reward.ndim == 2:
+            seq_log_reward = verl_F.masked_mean(reward, response_mask, axis=1)
+        else:
+            raise ValueError(f"`reward` should be 1D or 2D tensor, got shape={tuple(reward.shape)}")
+        seq_log_reward = seq_log_reward.to(device=avg_logpf.device, dtype=avg_logpf.dtype)
+
+        if bool(self.config.get("detach_reward_for_flow_loss", True)):
+            seq_log_reward = seq_log_reward.detach()
         
         # TB loss residual
         delta = log_z + avg_logpf - 15 * seq_log_reward - avg_logp_ref
@@ -525,8 +704,8 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/old_log_prob": verl_F.masked_mean(logpf_old, response_mask).detach().item(),
                             "actor/ref_log_prob": verl_F.masked_mean(logf_ref, response_mask).detach().item(),
                             "actor/log_z": log_z.mean().detach().item(),
-                            "actor/log_reward": verl_F.masked_mean(reward, response_mask).detach().item(),
-                            "actor/final_loss": avg_loss.detach().item(),
+                            "actor/log_reward": seq_log_reward.mean().detach().item(),
+                            "actor/flow_loss": avg_loss.detach().item(),
                             "actor/importance_weight": imp_w.mean().detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),  # PPO-style KL (current vs old policy)
                             "actor/ref_kl": ref_kl.detach().item(),  # KL with reference policy

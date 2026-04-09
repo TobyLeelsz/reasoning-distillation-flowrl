@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import random
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -27,7 +28,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Dict, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 import numpy as np
 import ray
@@ -53,6 +54,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.reward import AsyncRewardWorker, compute_reward
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.model import compute_position_id_with_mask
 from verl.utils.metric import (
     reduce_metrics,
 )
@@ -426,6 +428,17 @@ class RayPPOTrainer:
         self.validation_generations_logger = ValidationGenerationsLogger()
         self._reward_async_workers = []
         self._reward_async_num_workers = 0
+        self._use_rollout_logprob_reward = bool(config.reward_model.get("use_rollout_logprob_reward", False))
+        if self._use_rollout_logprob_reward and not self.use_reference_policy:
+            raise ValueError(
+                "reward_model.use_rollout_logprob_reward=True requires reference-policy log-probs. "
+                "Enable actor_rollout_ref.actor.use_kl_loss or algorithm.use_kl_in_reward."
+            )
+        self._chi_positive_pool_enabled = False
+        self._chi_positive_jsonl = None
+        self._chi_prompt_to_pos: dict[tuple[int, ...], list[list[int]]] = {}
+        self._chi_rng = random.Random(42)
+        self._chi_positive_pool_size = 0
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
@@ -451,6 +464,7 @@ class RayPPOTrainer:
 
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self._init_chi_squared_positive_pool()
 
     def _validate_config(self):
         config = self.config
@@ -1038,6 +1052,337 @@ class RayPPOTrainer:
                 reward_extra_infos_dict[key].extend(values)
         return torch.cat(reward_tensors, dim=0), reward_extra_infos_dict
 
+    def _compose_rollout_logprob_reward(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: dict[str, list],
+    ) -> tuple[torch.Tensor, dict[str, list]]:
+        if "old_log_probs" not in batch.batch or "ref_log_prob" not in batch.batch:
+            raise RuntimeError(
+                "reward_model.use_rollout_logprob_reward=True requires both old_log_probs and ref_log_prob in batch."
+            )
+
+        response_mask = batch.batch["response_mask"]
+        old_log_probs = batch.batch["old_log_probs"]
+        ref_log_prob = batch.batch["ref_log_prob"]
+        if old_log_probs.shape != ref_log_prob.shape:
+            raise RuntimeError(
+                "old_log_probs and ref_log_prob shape mismatch: "
+                f"{tuple(old_log_probs.shape)} vs {tuple(ref_log_prob.shape)}"
+            )
+
+        if reward_tensor.ndim == 1:
+            seq_rule_raw = reward_tensor.to(device=old_log_probs.device, dtype=torch.float32)
+        elif reward_tensor.ndim == 2:
+            seq_rule_raw = (reward_tensor.to(device=old_log_probs.device, dtype=torch.float32) * response_mask.to(torch.float32)).sum(dim=-1)
+        else:
+            raise RuntimeError(f"Unexpected reward tensor rank: {reward_tensor.ndim}")
+
+        # Binary rule reward: +1 if correct (>0), else -1.
+        rule_reward = torch.where(seq_rule_raw > 0.0, torch.ones_like(seq_rule_raw), -torch.ones_like(seq_rule_raw))
+
+        # Use rollout-batch policy/ref log-prob ratio and binarize to {-1, +1}.
+        seq_log_ratio = masked_mean(old_log_probs - ref_log_prob, mask=response_mask, axis=-1)
+        seq_log_ratio = seq_log_ratio.to(dtype=torch.float32)
+        log_ratio_reward = torch.where(seq_log_ratio > 0.0, torch.ones_like(seq_log_ratio), -torch.ones_like(seq_log_ratio))
+
+        seq_total_reward = rule_reward + log_ratio_reward
+
+        responses = batch.batch["responses"]
+        token_level_scores = torch.zeros(
+            size=responses.shape,
+            dtype=torch.float32,
+            device=responses.device,
+        )
+        response_lengths = response_mask.sum(dim=-1).long()
+        valid_rows = response_lengths > 0
+        if valid_rows.any():
+            row_idx = torch.nonzero(valid_rows, as_tuple=False).squeeze(-1)
+            col_idx = response_lengths[valid_rows] - 1
+            token_level_scores[row_idx, col_idx] = seq_total_reward[valid_rows]
+
+        reward_extra_infos = dict(reward_extra_infos_dict) if reward_extra_infos_dict is not None else {}
+        reward_extra_infos["rule_reward"] = rule_reward.detach().cpu().tolist()
+        reward_extra_infos["log_ratio_reward"] = log_ratio_reward.detach().cpu().tolist()
+        reward_extra_infos["raw_score_before_clip"] = seq_total_reward.detach().cpu().tolist()
+
+        return token_level_scores, reward_extra_infos
+
+    def _init_chi_squared_positive_pool(self):
+        actor_cfg = self.config.actor_rollout_ref.actor
+        chi_loss_coef = float(actor_cfg.get("chi_squared_loss_coef", 1.0))
+        if chi_loss_coef <= 0:
+            return
+
+        positive_jsonl = actor_cfg.get("chi_squared_positive_jsonl", None)
+        if not positive_jsonl:
+            reward_kwargs = (
+                self.config.get("custom_reward_function", {})
+                .get("reward_kwargs", {})
+            )
+            positive_jsonl = reward_kwargs.get("online_train_positive_jsonl", None)
+        if not positive_jsonl:
+            return
+        if not os.path.exists(str(positive_jsonl)):
+            raise FileNotFoundError(
+                f"chi-squared positive pool file not found: {positive_jsonl}"
+            )
+
+        seed = int(actor_cfg.get("chi_squared_positive_seed", 42))
+        self._chi_rng = random.Random(seed)
+        self._chi_positive_jsonl = str(positive_jsonl)
+        self._chi_positive_pool_enabled = True
+
+        prompt_to_pos: dict[tuple[int, ...], list[list[int]]] = {}
+        loaded = 0
+        skipped = 0
+        with open(self._chi_positive_jsonl, "r", encoding="utf-8") as f:
+            for line_idx, raw_line in enumerate(f, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+
+                responses = record.get("responses")
+                if not isinstance(responses, (list, tuple)) or len(responses) < 2:
+                    skipped += 1
+                    continue
+                pos_text = responses[1]
+                if pos_text is None:
+                    skipped += 1
+                    continue
+
+                prompt_ids = self._tokenize_training_prompt(record.get("prompt", ""))
+                if not prompt_ids:
+                    skipped += 1
+                    continue
+
+                pos_ids = self.tokenizer(
+                    str(pos_text),
+                    add_special_tokens=False,
+                ).input_ids
+                pos_ids = [int(x) for x in pos_ids]
+                if not pos_ids:
+                    skipped += 1
+                    continue
+
+                prompt_to_pos.setdefault(tuple(prompt_ids), []).append(pos_ids)
+                loaded += 1
+
+        self._chi_prompt_to_pos = prompt_to_pos
+        self._chi_positive_pool_size = loaded
+        if not self._chi_prompt_to_pos:
+            raise RuntimeError(
+                "chi-squared positive pool initialized but no valid prompt/response pairs were loaded."
+            )
+        print(
+            "[chi_squared] positive pool initialized: "
+            f"pairs={loaded}, unique_prompts={len(self._chi_prompt_to_pos)}, skipped={skipped}, "
+            f"source={self._chi_positive_jsonl}"
+        )
+
+    def _normalize_chi_prompt(self, prompt: Any) -> str:
+        # Match chi_squared_rm.py prompt normalization.
+        if isinstance(prompt, str):
+            return prompt
+        if isinstance(prompt, (list, tuple)):
+            return "\n".join(str(x) for x in prompt)
+        if isinstance(prompt, dict):
+            for key in ("prompt", "question", "content", "text"):
+                if key in prompt:
+                    return self._normalize_chi_prompt(prompt[key])
+            return json.dumps(prompt, ensure_ascii=False)
+        return str(prompt)
+
+    def _tokenize_training_prompt(self, prompt: Any) -> list[int]:
+        prompt_text = self._normalize_chi_prompt(prompt)
+        system_prompt = self.config.data.get("system_prompt", "You are a helpful assistant.")
+        user_prompt_template = self.config.data.get("user_prompt_template", "{problem}")
+        try:
+            user_content = str(user_prompt_template).format(problem=prompt_text)
+        except Exception:
+            user_content = prompt_text
+
+        if hasattr(self.tokenizer, "apply_chat_template") and getattr(self.tokenizer, "chat_template", None):
+            messages = [
+                {"role": "system", "content": str(system_prompt)},
+                {"role": "user", "content": user_content},
+            ]
+            raw_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            raw_prompt = user_content
+
+        prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        max_prompt_length = int(self.config.data.max_prompt_length)
+        truncation = str(self.config.data.get("truncation", "left"))
+        if len(prompt_ids) > max_prompt_length:
+            if truncation == "left":
+                prompt_ids = prompt_ids[-max_prompt_length:]
+            elif truncation == "right":
+                prompt_ids = prompt_ids[:max_prompt_length]
+            elif truncation == "middle":
+                left_half = max_prompt_length // 2
+                right_half = max_prompt_length - left_half
+                prompt_ids = prompt_ids[:left_half] + prompt_ids[-right_half:]
+            elif truncation == "error":
+                raise RuntimeError(
+                    f"Prompt length {len(prompt_ids)} exceeds max_prompt_length={max_prompt_length} while truncation=error."
+                )
+            else:
+                prompt_ids = prompt_ids[-max_prompt_length:]
+        return [int(x) for x in prompt_ids]
+
+    def _build_chi_positive_tensors(self, batch: DataProto) -> Optional[dict[str, torch.Tensor]]:
+        if not self._chi_positive_pool_enabled:
+            return None
+        if "input_ids" not in batch.batch or "attention_mask" not in batch.batch or "responses" not in batch.batch:
+            return None
+
+        input_ids = batch.batch["input_ids"]
+        attention_mask = batch.batch["attention_mask"]
+        responses = batch.batch["responses"]
+        if "response_mask" in batch.batch:
+            response_mask = batch.batch["response_mask"]
+        else:
+            response_length = responses.size(1)
+            response_mask = attention_mask[:, -response_length:]
+
+        bsz = int(input_ids.size(0))
+        max_total_len = int(input_ids.size(1))
+        pad_token_id = (
+            int(self.tokenizer.pad_token_id)
+            if self.tokenizer.pad_token_id is not None
+            else 0
+        )
+        eos_token_id = self.tokenizer.eos_token_id
+
+        full_sequences: list[list[int]] = []
+        pos_responses: list[list[int]] = []
+        for i in range(bsz):
+            valid_ids = input_ids[i][attention_mask[i].bool()].tolist()
+            neg_len = int(response_mask[i].sum().item())
+            prompt_ids = valid_ids[:-neg_len] if neg_len > 0 and neg_len < len(valid_ids) else []
+            if not prompt_ids and "prompts" in batch.batch:
+                prompt_ids = [
+                    int(x)
+                    for x in batch.batch["prompts"][i].tolist()
+                    if int(x) != pad_token_id
+                ]
+            prompt_key = tuple(int(x) for x in prompt_ids)
+            pos_candidates = self._chi_prompt_to_pos.get(prompt_key)
+            if not pos_candidates:
+                prompt_prefix = ",".join(str(x) for x in prompt_ids[:16])
+                raise RuntimeError(
+                    "chi-squared positive sample not found for rollout prompt "
+                    f"(prompt_len={len(prompt_ids)}, prompt_prefix=[{prompt_prefix}])."
+                )
+
+            pos_ids = list(self._chi_rng.choice(pos_candidates))
+            if eos_token_id is not None:
+                pos_ids = pos_ids + [int(eos_token_id)]
+
+            seq_ids = prompt_ids + pos_ids
+            if len(seq_ids) > max_total_len:
+                seq_ids = seq_ids[-max_total_len:]
+            prompt_len_after_trunc = min(len(prompt_ids), len(seq_ids))
+            pos_ids_after_trunc = seq_ids[prompt_len_after_trunc:]
+
+            full_sequences.append([int(x) for x in seq_ids])
+            pos_responses.append([int(x) for x in pos_ids_after_trunc])
+
+        # Keep at least width=1 so tensor shapes stay valid even when all positives are
+        # fully truncated after prompt clipping. Their masks remain all-zero.
+        max_pos_len = max(1, max(len(x) for x in pos_responses))
+        chi_pos_input_ids = torch.full((bsz, max_total_len), fill_value=pad_token_id, dtype=torch.long)
+        chi_pos_attention_mask = torch.zeros((bsz, max_total_len), dtype=torch.long)
+        chi_pos_responses = torch.full((bsz, max_pos_len), fill_value=pad_token_id, dtype=torch.long)
+        chi_pos_response_mask = torch.zeros((bsz, max_pos_len), dtype=torch.long)
+
+        for i, (seq_ids, pos_resp_ids) in enumerate(zip(full_sequences, pos_responses)):
+            seq_len = len(seq_ids)
+            resp_len = len(pos_resp_ids)
+            chi_pos_input_ids[i, -seq_len:] = torch.tensor(seq_ids, dtype=torch.long)
+            chi_pos_attention_mask[i, -seq_len:] = 1
+            if resp_len > 0:
+                chi_pos_responses[i, -resp_len:] = torch.tensor(pos_resp_ids, dtype=torch.long)
+                chi_pos_response_mask[i, -resp_len:] = 1
+
+        chi_pos_position_ids = compute_position_id_with_mask(chi_pos_attention_mask)
+        return {
+            "chi_pos_input_ids": chi_pos_input_ids,
+            "chi_pos_attention_mask": chi_pos_attention_mask,
+            "chi_pos_position_ids": chi_pos_position_ids,
+            "chi_pos_responses": chi_pos_responses,
+            "chi_pos_response_mask": chi_pos_response_mask,
+        }
+
+    def _build_logprob_meta(self, batch_meta_info: dict) -> dict:
+        meta_info = dict(batch_meta_info)
+        if "micro_batch_size" not in meta_info:
+            mbs = self.config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu
+            if mbs is None:
+                mbs = self.config.actor_rollout_ref.ref.log_prob_micro_batch_size
+            if mbs is None:
+                mbs = 1
+            meta_info["micro_batch_size"] = int(mbs)
+        if "temperature" not in meta_info:
+            meta_info["temperature"] = float(self.config.actor_rollout_ref.rollout.temperature)
+        if "use_dynamic_bsz" not in meta_info:
+            meta_info["use_dynamic_bsz"] = bool(self.config.actor_rollout_ref.ref.log_prob_use_dynamic_bsz)
+        if meta_info["use_dynamic_bsz"] and "max_token_len" not in meta_info:
+            max_token_len = self.config.actor_rollout_ref.ref.log_prob_max_token_len_per_gpu
+            if max_token_len is None:
+                max_token_len = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
+            meta_info["max_token_len"] = int(max_token_len)
+        return meta_info
+
+    def _attach_chi_squared_positive_batch(self, batch: DataProto, metrics: dict):
+        if not self._chi_positive_pool_enabled:
+            return
+        chi_loss_coef = float(self.config.actor_rollout_ref.actor.get("chi_squared_loss_coef", 1.0))
+        if chi_loss_coef <= 0:
+            return
+
+        pos_tensors = self._build_chi_positive_tensors(batch)
+        if pos_tensors is None:
+            return
+
+        pos_ref_batch = DataProto.from_dict(
+            tensors={
+                "responses": pos_tensors["chi_pos_responses"],
+                "input_ids": pos_tensors["chi_pos_input_ids"],
+                "attention_mask": pos_tensors["chi_pos_attention_mask"],
+                "position_ids": pos_tensors["chi_pos_position_ids"],
+            },
+            meta_info=self._build_logprob_meta(batch.meta_info),
+        )
+
+        if self.use_reference_policy:
+            if not self.ref_in_actor:
+                pos_ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(pos_ref_batch)
+            else:
+                pos_ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(pos_ref_batch)
+            pos_tensors["chi_pos_ref_log_prob"] = pos_ref_log_prob.batch["ref_log_prob"]
+        else:
+            pos_tensors["chi_pos_ref_log_prob"] = torch.zeros_like(
+                pos_tensors["chi_pos_responses"], dtype=torch.float32
+            )
+
+        for key, tensor in pos_tensors.items():
+            batch.batch[key] = tensor
+
+        metrics["reward/chi_positive_pool/pairs"] = float(pos_tensors["chi_pos_input_ids"].size(0))
+        metrics["reward/chi_positive_pool/size"] = float(self._chi_positive_pool_size)
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1220,11 +1565,30 @@ class RayPPOTrainer:
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_results = ray.get(future_reward)
                             reward_tensor, reward_extra_infos_dict = self._merge_async_reward_results(reward_results)
+
+                        if self._use_rollout_logprob_reward:
+                            reward_tensor, reward_extra_infos_dict = self._compose_rollout_logprob_reward(
+                                batch=batch,
+                                reward_tensor=reward_tensor,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                            )
+
                         batch.batch["token_level_scores"] = reward_tensor
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            # Surface scalar reward components as tensors so actor loss can consume them.
+                            for scalar_key in ("rule_reward", "log_ratio_reward", "raw_score_before_clip"):
+                                values = reward_extra_infos_dict.get(scalar_key)
+                                if values is None:
+                                    continue
+                                scalar_tensor = torch.as_tensor(values, dtype=torch.float32, device=reward_tensor.device)
+                                if scalar_tensor.ndim != 1:
+                                    continue
+                                if scalar_tensor.numel() != reward_tensor.size(0):
+                                    continue
+                                batch.batch[scalar_key] = scalar_tensor
                             _add_reward_component_stats(metrics, reward_extra_infos_dict)
 
                         # compute rewards. apply_kl_penalty if available
@@ -1262,6 +1626,7 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer("update_actor", timing_raw):
+                            self._attach_chi_squared_positive_batch(batch=batch, metrics=metrics)
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])

@@ -260,7 +260,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
     exec env \
-        PRETRAINED_MODEL=$PROJECT_ROOT/downloads/Qwen/sft-dapo-17k-qwen3-1.7b \
+        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
         MODEL_TAG=qwen3_1p7b \
         MODEL_SIZE_DIR=1.7B \
         REWARD_MODE=rule \
@@ -273,7 +273,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
         bash "$0" "$@"
 fi
 
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-$PROJECT_ROOT/downloads/Qwen/sft-dapo-17k-qwen3-1.7b}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-Qwen/Qwen3-1.7B-Base}
 MODEL_TAG=${MODEL_TAG:-qwen3_1p7b}
 MODEL_SIZE_DIR=${MODEL_SIZE_DIR:-1.7B}
 REWARD_MODE=${REWARD_MODE:-rule}
@@ -285,10 +285,12 @@ save_freq=100
 
 # Split mode:
 # reserve some GPUs for actor+rollout/update and the rest for async reward computation.
-# Default split is 2 (actor/update) + 2 (reward) on a 4-GPU node for log-ratio reward.
-default_split_mode=1
-if [ "$REWARD_MODE" = "rule" ]; then
-    default_split_mode=0
+# Default is to NOT split so actor/rollout can use all visible GPUs.
+# Set USE_SEPARATE_REWARD_GPU=1 to default to split mode for log-ratio reward.
+USE_SEPARATE_REWARD_GPU=${USE_SEPARATE_REWARD_GPU:-0}
+default_split_mode=0
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$USE_SEPARATE_REWARD_GPU" = "1" ]; then
+    default_split_mode=1
 fi
 if [ "$n_gpus_per_node" -ge 4 ]; then
     OPTION1_SPLIT_MODE=${OPTION1_SPLIT_MODE:-$default_split_mode}
@@ -323,7 +325,12 @@ if [ "$OPTION1_SPLIT_MODE" = "1" ]; then
     n_gpus_per_node=$ACTOR_ROLLOUT_GPUS
 fi
 
-dapo_train_path=${FLOWRL_MATH_TRAIN_PATH:-$PROJECT_ROOT/data/math_data/dapo-math-17k.parquet}
+aligned_math_train_path=$PROJECT_ROOT/data/math_data/dapo-math-17k.prompt_aligned_with_dapo17k_rm.parquet
+dapo_train_path=${FLOWRL_MATH_TRAIN_PATH:-$aligned_math_train_path}
+if [ ! -f "$dapo_train_path" ]; then
+    echo "Training file not found: $dapo_train_path"
+    exit 1
+fi
 base_val_path=${FLOWRL_MATH_VAL_PATH:-$PROJECT_ROOT/data/math_data/validation.parquet}
 eval_keep_sources=${FLOWRL_KEEP_EVAL_SOURCES:-aime2024,aime2025,gpqa}
 eval_cache_dir=${FLOWRL_EVAL_CACHE_DIR:-/tmp}
@@ -462,7 +469,7 @@ fi
 #   plus a repeated 10-gram penalty
 
 # Log-ratio reward model settings (used when REWARD_MODE=log_ratio_rm)
-RM_POLICY_MODEL=${RM_POLICY_MODEL:-/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629}
+RM_POLICY_MODEL=${RM_POLICY_MODEL:-$PRETRAINED_MODEL}
 RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-$PRETRAINED_MODEL}
 RM_TOKENIZER_PATH=${RM_TOKENIZER_PATH:-$PRETRAINED_MODEL}
 RM_BETA=${RM_BETA:-0.2} # 0.001
@@ -472,12 +479,27 @@ RM_REPEAT_PENALTY_CLIP_MIN=${RM_REPEAT_PENALTY_CLIP_MIN:--1.0}
 RM_LOG_RATIO_REWARD_CLIP_MIN=${RM_LOG_RATIO_REWARD_CLIP_MIN:--1.0}
 RM_REWARD_CLIP_MIN=${RM_REWARD_CLIP_MIN:-null}
 RM_MICRO_BSZ=${RM_MICRO_BSZ:-1}
+_rm_device_map_user_set=0
+if [ -n "${RM_DEVICE_MAP+x}" ]; then
+    _rm_device_map_user_set=1
+fi
+_rm_torch_dtype_user_set=0
+if [ -n "${RM_TORCH_DTYPE+x}" ]; then
+    _rm_torch_dtype_user_set=1
+fi
 RM_DEVICE_MAP=${RM_DEVICE_MAP:-auto}
 RM_TORCH_DTYPE=${RM_TORCH_DTYPE:-$ROLLOUT_DTYPE}
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$OPTION1_SPLIT_MODE" != "1" ] && [ "$_rm_device_map_user_set" = "0" ]; then
+    RM_DEVICE_MAP=cpu
+    if [ "$_rm_torch_dtype_user_set" = "0" ]; then
+        RM_TORCH_DTYPE=float32
+    fi
+    echo "[INFO] OPTION1_SPLIT_MODE=0 with no explicit RM_DEVICE_MAP; using RM_DEVICE_MAP=$RM_DEVICE_MAP RM_TORCH_DTYPE=$RM_TORCH_DTYPE"
+fi
 RM_ATTN_IMPLEMENTATION=${RM_ATTN_IMPLEMENTATION:-eager}
 RM_OFFLOAD_FOLDER=${RM_OFFLOAD_FOLDER:-/tmp/verl_reward_offload}
 RM_MAX_GPU_MEMORY=${RM_MAX_GPU_MEMORY:-2GiB}
-RM_ONLINE_TRAIN=${RM_ONLINE_TRAIN:-1}
+RM_ONLINE_TRAIN=${RM_ONLINE_TRAIN:-0}
 RM_ONLINE_TRAIN_POSITIVE_JSONL=${RM_ONLINE_TRAIN_POSITIVE_JSONL:-/proj/weitongzlab/projects/rm_training/generate/dapo_17k_merged_qwen3.jsonl}
 RM_ONLINE_TRAIN_BETA=${RM_ONLINE_TRAIN_BETA:-0.001}
 RM_ONLINE_TRAIN_LENGTH_NORMALIZE=${RM_ONLINE_TRAIN_LENGTH_NORMALIZE:-0}
@@ -490,6 +512,14 @@ RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE=${RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE:
 RM_ONLINE_TRAIN_SKIP_WARMUP=${RM_ONLINE_TRAIN_SKIP_WARMUP:-0}
 RM_ONLINE_TRAIN_USE_DATAPARALLEL=${RM_ONLINE_TRAIN_USE_DATAPARALLEL:-0}
 RM_ONLINE_TRAIN_SINGLE_WORKER=${RM_ONLINE_TRAIN_SINGLE_WORKER:-1}
+USE_ROLLOUT_LOGPROB_REWARD=${USE_ROLLOUT_LOGPROB_REWARD:-1}
+# Joint actor objective knobs: L = Flow_Loss + chi_squared_loss.
+POLICY_CHI_LOSS_COEF=${POLICY_CHI_LOSS_COEF:-500}
+POLICY_CHI_BETA=${POLICY_CHI_BETA:-$RM_ONLINE_TRAIN_BETA}
+POLICY_CHI_REG_COEF=${POLICY_CHI_REG_COEF:-0.005}
+POLICY_CHI_R_MAX=${POLICY_CHI_R_MAX:-1.0}
+POLICY_CHI_R_MIN=${POLICY_CHI_R_MIN:--1.0}
+POLICY_CHI_POSITIVE_JSONL=${POLICY_CHI_POSITIVE_JSONL:-$RM_ONLINE_TRAIN_POSITIVE_JSONL}
 RM_FORCE_CPU=${RM_FORCE_CPU:-0}
 if [ "$RM_FORCE_CPU" = "1" ]; then
     RM_DEVICE_MAP=cpu
@@ -623,40 +653,50 @@ case "$REWARD_MODE" in
     )
     ;;
   log_ratio_rm)
-    reward_overrides=(
-      reward_model.reward_manager=batch
-      custom_reward_function.path=$VERL_ROOT/verl/trainer/ppo/log_ratio_reward.py
-      custom_reward_function.name=compute_score
-      custom_reward_function.reward_kwargs.policy_model_path=$RM_POLICY_MODEL
-      custom_reward_function.reward_kwargs.reference_model_path=$RM_REFERENCE_MODEL
-      custom_reward_function.reward_kwargs.tokenizer_path=$RM_TOKENIZER_PATH
-      custom_reward_function.reward_kwargs.beta=$RM_BETA
-      custom_reward_function.reward_kwargs.repeat_penalty_weight=$RM_REPEAT_PENALTY_WEIGHT
-      custom_reward_function.reward_kwargs.repeat_penalty_ngram_size=$RM_REPEAT_PENALTY_NGRAM_SIZE
-      custom_reward_function.reward_kwargs.repeat_penalty_clip_min=$RM_REPEAT_PENALTY_CLIP_MIN
-      custom_reward_function.reward_kwargs.log_ratio_reward_clip_min=$RM_LOG_RATIO_REWARD_CLIP_MIN
-      custom_reward_function.reward_kwargs.reward_clip_min=$RM_REWARD_CLIP_MIN
-      custom_reward_function.reward_kwargs.micro_batch_size=$RM_MICRO_BSZ
-      custom_reward_function.reward_kwargs.device_map=$RM_DEVICE_MAP
-      custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
-      ++custom_reward_function.reward_kwargs.attn_implementation=$RM_ATTN_IMPLEMENTATION
-      custom_reward_function.reward_kwargs.offload_folder=$RM_OFFLOAD_FOLDER
-      custom_reward_function.reward_kwargs.max_gpu_memory=$RM_MAX_GPU_MEMORY
-      custom_reward_function.reward_kwargs.normalize_by_length=True
-      custom_reward_function.reward_kwargs.online_train_with_rollout=$RM_ONLINE_TRAIN_BOOL
-      custom_reward_function.reward_kwargs.online_train_positive_jsonl=$RM_ONLINE_TRAIN_POSITIVE_JSONL
-      custom_reward_function.reward_kwargs.online_train_beta=$RM_ONLINE_TRAIN_BETA
-      custom_reward_function.reward_kwargs.online_train_length_normalize=$RM_ONLINE_TRAIN_LENGTH_NORMALIZE_BOOL
-      custom_reward_function.reward_kwargs.online_train_lr=$RM_ONLINE_TRAIN_LR
-      custom_reward_function.reward_kwargs.online_train_micro_batch_size=$RM_ONLINE_TRAIN_MICRO_BSZ
-      custom_reward_function.reward_kwargs.online_train_max_pairs=$RM_ONLINE_TRAIN_MAX_PAIRS
-      custom_reward_function.reward_kwargs.online_train_prompt_max_length=$RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH
-      custom_reward_function.reward_kwargs.online_train_updates_per_rollout_batch=$RM_ONLINE_TRAIN_UPDATES_PER_BATCH
-      custom_reward_function.reward_kwargs.online_train_use_dataparallel=$RM_ONLINE_TRAIN_USE_DATAPARALLEL_BOOL
-      custom_reward_function.reward_kwargs.online_train_rollout_minibatch_size=$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE
-      custom_reward_function.reward_kwargs.online_train_skip_warmup_data=$RM_ONLINE_TRAIN_SKIP_WARMUP_BOOL
-      +custom_reward_function.reward_kwargs.online_train_reference_from_policy=False
-    )
+    if [ "$USE_ROLLOUT_LOGPROB_REWARD" = "1" ]; then
+      reward_overrides=(
+        reward_model.reward_manager=batch
+        +reward_model.use_rollout_logprob_reward=True
+        reward_model.launch_reward_fn_async=False
+        custom_reward_function.path=null
+        custom_reward_function.name=compute_score
+      )
+    else
+      reward_overrides=(
+        reward_model.reward_manager=batch
+        custom_reward_function.path=$VERL_ROOT/verl/trainer/ppo/log_ratio_reward.py
+        custom_reward_function.name=compute_score
+        custom_reward_function.reward_kwargs.policy_model_path=$RM_POLICY_MODEL
+        custom_reward_function.reward_kwargs.reference_model_path=$RM_REFERENCE_MODEL
+        custom_reward_function.reward_kwargs.tokenizer_path=$RM_TOKENIZER_PATH
+        custom_reward_function.reward_kwargs.beta=$RM_BETA
+        custom_reward_function.reward_kwargs.repeat_penalty_weight=$RM_REPEAT_PENALTY_WEIGHT
+        custom_reward_function.reward_kwargs.repeat_penalty_ngram_size=$RM_REPEAT_PENALTY_NGRAM_SIZE
+        custom_reward_function.reward_kwargs.repeat_penalty_clip_min=$RM_REPEAT_PENALTY_CLIP_MIN
+        custom_reward_function.reward_kwargs.log_ratio_reward_clip_min=$RM_LOG_RATIO_REWARD_CLIP_MIN
+        custom_reward_function.reward_kwargs.reward_clip_min=$RM_REWARD_CLIP_MIN
+        custom_reward_function.reward_kwargs.micro_batch_size=$RM_MICRO_BSZ
+        custom_reward_function.reward_kwargs.device_map=$RM_DEVICE_MAP
+        custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
+        ++custom_reward_function.reward_kwargs.attn_implementation=$RM_ATTN_IMPLEMENTATION
+        custom_reward_function.reward_kwargs.offload_folder=$RM_OFFLOAD_FOLDER
+        custom_reward_function.reward_kwargs.max_gpu_memory=$RM_MAX_GPU_MEMORY
+        custom_reward_function.reward_kwargs.normalize_by_length=True
+        custom_reward_function.reward_kwargs.online_train_with_rollout=$RM_ONLINE_TRAIN_BOOL
+        custom_reward_function.reward_kwargs.online_train_positive_jsonl=$RM_ONLINE_TRAIN_POSITIVE_JSONL
+        custom_reward_function.reward_kwargs.online_train_beta=$RM_ONLINE_TRAIN_BETA
+        custom_reward_function.reward_kwargs.online_train_length_normalize=$RM_ONLINE_TRAIN_LENGTH_NORMALIZE_BOOL
+        custom_reward_function.reward_kwargs.online_train_lr=$RM_ONLINE_TRAIN_LR
+        custom_reward_function.reward_kwargs.online_train_micro_batch_size=$RM_ONLINE_TRAIN_MICRO_BSZ
+        custom_reward_function.reward_kwargs.online_train_max_pairs=$RM_ONLINE_TRAIN_MAX_PAIRS
+        custom_reward_function.reward_kwargs.online_train_prompt_max_length=$RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH
+        custom_reward_function.reward_kwargs.online_train_updates_per_rollout_batch=$RM_ONLINE_TRAIN_UPDATES_PER_BATCH
+        custom_reward_function.reward_kwargs.online_train_use_dataparallel=$RM_ONLINE_TRAIN_USE_DATAPARALLEL_BOOL
+        custom_reward_function.reward_kwargs.online_train_rollout_minibatch_size=$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE
+        custom_reward_function.reward_kwargs.online_train_skip_warmup_data=$RM_ONLINE_TRAIN_SKIP_WARMUP_BOOL
+        +custom_reward_function.reward_kwargs.online_train_reference_from_policy=False
+      )
+    fi
     ;;
   *)
     echo "Unsupported REWARD_MODE: $REWARD_MODE"
@@ -669,7 +709,7 @@ experiment_name="${base_experiment_name}_${REWARD_MODE}"
 OUTPUT_DIR=checkpoints/FlowRL/math/$MODEL_SIZE_DIR/$experiment_name
 
 safe_overrides=()
-if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$LOG_RATIO_SAFE_MODE" = "1" ]; then
+if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$LOG_RATIO_SAFE_MODE" = "1" ] && [ "$USE_ROLLOUT_LOGPROB_REWARD" != "1" ]; then
     safe_overrides=(
         reward_model.launch_reward_fn_async=True
         data.train_batch_size=$SAFE_TRAIN_BATCH_SIZE
@@ -688,7 +728,7 @@ if [ "$REWARD_MODE" = "log_ratio_rm" ] && [ "$RM_ONLINE_TRAIN" = "1" ] && [ "$RM
 fi
 
 option1_overrides=()
-if [ "$OPTION1_SPLIT_MODE" = "1" ]; then
+if [ "$OPTION1_SPLIT_MODE" = "1" ] && [ "$USE_ROLLOUT_LOGPROB_REWARD" != "1" ]; then
     option1_overrides=(
         reward_model.launch_reward_fn_async=True
         reward_model.reward_fn_async_num_workers=$reward_async_num_workers
@@ -783,7 +823,7 @@ if [ "$MIN_MEM_MODE" = "1" ]; then
         custom_reward_function.reward_kwargs.micro_batch_size=1
     )
 
-    if [ "$MIN_MEM_REWARD_GPU" = "1" ] && [ "$OPTION1_SPLIT_MODE" = "1" ] && [ "$REWARD_ASYNC_NUM_GPUS" -ge 1 ]; then
+    if [ "$MIN_MEM_REWARD_GPU" = "1" ] && [ "$OPTION1_SPLIT_MODE" = "1" ] && [ "$REWARD_ASYNC_NUM_GPUS" -ge 1 ] && [ "$USE_ROLLOUT_LOGPROB_REWARD" != "1" ]; then
         minmem_overrides+=(
             reward_model.launch_reward_fn_async=True
             reward_model.reward_fn_async_num_workers=$reward_async_num_workers
@@ -810,9 +850,9 @@ if [ "$USE_FUSED_KERNELS" = "1" ]; then
 fi
 
 set -x
-echo "[INFO] REWARD_MODE=$REWARD_MODE LOG_RATIO_SAFE_MODE=$LOG_RATIO_SAFE_MODE TESTING_MODE=$TESTING_MODE MIN_MEM_MODE=$MIN_MEM_MODE MIN_MEM_REWARD_GPU=$MIN_MEM_REWARD_GPU"
+echo "[INFO] REWARD_MODE=$REWARD_MODE USE_ROLLOUT_LOGPROB_REWARD=$USE_ROLLOUT_LOGPROB_REWARD LOG_RATIO_SAFE_MODE=$LOG_RATIO_SAFE_MODE TESTING_MODE=$TESTING_MODE MIN_MEM_MODE=$MIN_MEM_MODE MIN_MEM_REWARD_GPU=$MIN_MEM_REWARD_GPU"
 echo "[INFO] SINGLE_GPU_TEST_MODE=$SINGLE_GPU_TEST_MODE n_gpus_per_node=$n_gpus_per_node"
-echo "[INFO] OPTION1_SPLIT_MODE=$OPTION1_SPLIT_MODE ACTOR_ROLLOUT_GPUS=$n_gpus_per_node REWARD_ASYNC_NUM_GPUS=$REWARD_ASYNC_NUM_GPUS"
+echo "[INFO] OPTION1_SPLIT_MODE=$OPTION1_SPLIT_MODE USE_SEPARATE_REWARD_GPU=$USE_SEPARATE_REWARD_GPU ACTOR_ROLLOUT_GPUS=$n_gpus_per_node REWARD_ASYNC_NUM_GPUS=$REWARD_ASYNC_NUM_GPUS"
 echo "[INFO] TRAIN_BATCH_SIZE=$train_batch_size ROLLOUT_N=$rollout_n MAX_PROMPT_LENGTH=$max_prompt_length MAX_RESPONSE_LENGTH=$max_response_length ROLLOUT_GPU_MEMORY_UTIL=$rollout_gpu_memory_utilization ROLLOUT_MAX_NUM_SEQS=$rollout_max_num_seqs"
 echo "[INFO] ACTOR_PARAM_OFFLOAD=$actor_param_offload ACTOR_OPTIMIZER_OFFLOAD=$actor_optimizer_offload REF_PARAM_OFFLOAD=$ref_param_offload"
 echo "[INFO] USE_TORCH_COMPILE=$use_torch_compile FSDP_SYNC_MODULE_STATES=$fsdp_sync_module_states VERL_SKIP_MODEL_INIT_BARRIER=$skip_model_init_barrier DATALOADER_NUM_WORKERS=$dataloader_num_workers CPU_QUOTA=$cpu_quota REWARD_ASYNC_NUM_CPUS=$reward_async_num_cpus"
@@ -881,6 +921,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.chi_squared_loss_coef=$POLICY_CHI_LOSS_COEF \
+    actor_rollout_ref.actor.chi_squared_beta=$POLICY_CHI_BETA \
+    actor_rollout_ref.actor.chi_squared_reg_coef=$POLICY_CHI_REG_COEF \
+    actor_rollout_ref.actor.chi_squared_r_max=$POLICY_CHI_R_MAX \
+    actor_rollout_ref.actor.chi_squared_r_min=$POLICY_CHI_R_MIN \
+    actor_rollout_ref.actor.chi_squared_positive_jsonl=$POLICY_CHI_POSITIVE_JSONL \
+    actor_rollout_ref.actor.detach_reward_for_flow_loss=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=$actor_param_offload \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=$actor_optimizer_offload \

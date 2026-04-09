@@ -1,0 +1,10 @@
+cd /proj/weitongzlab/projects/reasoning-distillation-flowrl/verl_FlowRL
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+N_GPUS_PER_NODE=4 \
+OPTION1_SPLIT_MODE=0 \
+USE_SEPARATE_REWARD_GPU=0 \
+PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+FLOWRL_MATH_TRAIN_PATH=/proj/weitongzlab/projects/reasoning-distillation-flowrl/data/math_data/dapo-math-17k.prompt_aligned_with_dapo17k_rm.parquet \
+REWARD_MODE=log_ratio_rm \
+USE_ROLLOUT_LOGPROB_REWARD=1 \
+bash command/training/math/flowrl_7B_math.sh

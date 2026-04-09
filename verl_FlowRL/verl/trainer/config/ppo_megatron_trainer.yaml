@@ -58,6 +58,16 @@ actor_rollout_ref:
     use_kl_loss: False # True for GRPO
     kl_loss_coef: 0.001 # for grpo
     kl_loss_type: low_var_kl # for grpo
+    chi_squared_loss_coef: 1.0
+    chi_squared_beta: 0.001
+    chi_squared_reg_coef: 0.005
+    chi_squared_r_max: 1.0
+    chi_squared_r_min: -1.0
+    chi_squared_positive_jsonl: null
+    chi_squared_positive_seed: 42
+    chi_squared_require_positive_batch: True
+    detach_reward_for_flow_loss: True
+    flow_reward_clip_min: null
     ppo_epochs: 1
     data_loader_seed: null
     shuffle: False
