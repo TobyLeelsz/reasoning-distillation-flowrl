@@ -65,7 +65,11 @@ actor_rollout_ref:
     chi_squared_r_min: -1.0
     chi_squared_positive_jsonl: null
     chi_squared_positive_seed: 42
+    chi_squared_replay_buffer_size: 8192
     chi_squared_require_positive_batch: True
+    chi_squared_test_mode: False
+    flow_loss_coef: 1.0
+    flowrl_log_ratio_warmup_steps: 0
     detach_reward_for_flow_loss: True
     flow_reward_clip_min: null
     ppo_epochs: 1

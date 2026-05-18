@@ -758,7 +758,6 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
 
-
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob

@@ -20,7 +20,7 @@ Single Process Actor
 import itertools
 import logging
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -71,6 +71,12 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+
+    def _get_flow_loss_coef(self, global_step: Optional[int]) -> float:
+        # Keep the helper so older configs still parse, but always apply the
+        # configured FlowRL coefficient from the first optimization step.
+        del global_step
+        return float(self.config.get("flow_loss_coef", 1.0))
 
     def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False,return_log_z=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -354,8 +360,14 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
-
         available_batch_keys = set(data.batch.keys())
+        chi_batch_prefixes = (
+            "chi_replay_pos",
+            "chi_expert_pos",
+            "chi_replay_neg",
+            "chi_replay_neg_2",
+        )
+        flow_loss_coef = self._get_flow_loss_coef(data.meta_info.get("global_step", None))
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
         if "ref_log_prob" in available_batch_keys:
             select_keys.append("ref_log_prob")
@@ -365,16 +377,18 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("rule_reward")
         if "token_level_rewards" in available_batch_keys:
             select_keys.append("token_level_rewards")
-        for chi_key in (
-            "chi_pos_input_ids",
-            "chi_pos_attention_mask",
-            "chi_pos_position_ids",
-            "chi_pos_responses",
-            "chi_pos_response_mask",
-            "chi_pos_ref_log_prob",
-        ):
-            if chi_key in available_batch_keys:
-                select_keys.append(chi_key)
+        for chi_prefix in chi_batch_prefixes:
+            for chi_suffix in (
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "responses",
+                "response_mask",
+                "ref_log_prob",
+            ):
+                chi_key = f"{chi_prefix}_{chi_suffix}"
+                if chi_key in available_batch_keys:
+                    select_keys.append(chi_key)
         if multi_turn:
             select_keys.append("loss_mask")
         batch = data.select(batch_keys=select_keys).batch
@@ -438,63 +452,57 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy = True
                     entropy, log_prob, log_z = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, return_log_z=True)
 
-                    # Build current reward from current policy and detach log(pi) inside reward used by flow loss.
-                    flow_reward, _, _ = self._compute_current_flow_reward(
-                        logpf=log_prob,
-                        logf_ref=ref_log_prob,
-                        response_mask=response_mask,
-                        sample_data=data,
-                    )
-
+                    # Match the original FlowRL objective: use trainer-computed
+                    # advantages directly instead of recomputing reward here.
                     flow_loss, flow_metrics = self.compute_flowrl_objective(
                         logpf=log_prob,
                         logf_ref=ref_log_prob,
                         logpf_old=old_log_prob,
                         log_z=log_z,
-                        reward=flow_reward,
+                        reward=data["advantages"],
                         response_mask=response_mask,
                         clip_ratio=self.config.clip_ratio,
                     )
 
                     chi_squared_loss_coef = float(self.config.get("chi_squared_loss_coef", 1.0))
                     chi_required = bool(self.config.get("chi_squared_require_positive_batch", True))
-                    has_chi_positive_batch = all(
-                        key in data
-                        for key in (
-                            "chi_pos_input_ids",
-                            "chi_pos_attention_mask",
-                            "chi_pos_position_ids",
-                            "chi_pos_responses",
-                            "chi_pos_response_mask",
-                            "chi_pos_ref_log_prob",
-                        )
-                    )
-                    if chi_squared_loss_coef != 0.0 and not has_chi_positive_batch and chi_required:
-                        raise RuntimeError(
-                            "chi-squared loss is enabled but chi positive batch is missing. "
-                            "Expected chi_pos_* tensors from trainer."
-                        )
 
-                    if chi_squared_loss_coef != 0.0 and has_chi_positive_batch:
-                        pos_micro_batch = {
-                            "input_ids": data["chi_pos_input_ids"],
-                            "attention_mask": data["chi_pos_attention_mask"],
-                            "position_ids": data["chi_pos_position_ids"],
-                            "responses": data["chi_pos_responses"],
-                        }
-                        _, pos_log_prob = self._forward_micro_batch(
-                            micro_batch=pos_micro_batch,
-                            temperature=temperature,
-                            calculate_entropy=False,
-                            return_log_z=False,
-                        )
+                    if chi_squared_loss_coef != 0.0:
+                        chi_positive_groups = []
+                        chi_negative_groups = []
+                        chi_group_sample_counts = {}
+                        for chi_prefix in chi_batch_prefixes:
+                            chi_group = self._compute_chi_log_ratio_group(
+                                data=data,
+                                prefix=chi_prefix,
+                                temperature=temperature,
+                            )
+                            if chi_group is None:
+                                chi_group_sample_counts[chi_prefix] = 0.0
+                                continue
+                            chi_group_sample_counts[chi_prefix] = float(chi_group[0].size(0))
+                            if chi_prefix in ("chi_replay_pos", "chi_expert_pos"):
+                                chi_positive_groups.append(chi_group)
+                            else:
+                                chi_negative_groups.append(chi_group)
+
+                        if not chi_positive_groups and chi_required:
+                            raise RuntimeError(
+                                "chi-squared loss is enabled but chi positive batch is missing. "
+                                "Expected replay/expert chi batches from trainer."
+                            )
+
                         chi_squared_loss, chi_metrics = self._compute_chi_squared_loss(
-                            pos_logpf=pos_log_prob,
-                            pos_logf_ref=data["chi_pos_ref_log_prob"],
-                            pos_response_mask=data["chi_pos_response_mask"],
-                            neg_logpf=log_prob,
-                            neg_logf_ref=ref_log_prob,
-                            neg_response_mask=response_mask,
+                            positive_groups=chi_positive_groups,
+                            negative_groups=chi_negative_groups,
+                        )
+                        chi_metrics.update(
+                            {
+                                "actor/chi_replay_pos_samples": chi_group_sample_counts.get("chi_replay_pos", 0.0),
+                                "actor/chi_expert_pos_samples": chi_group_sample_counts.get("chi_expert_pos", 0.0),
+                                "actor/chi_replay_neg_samples": chi_group_sample_counts.get("chi_replay_neg", 0.0),
+                                "actor/chi_replay_neg_2_samples": chi_group_sample_counts.get("chi_replay_neg_2", 0.0),
+                            }
                         )
                     else:
                         chi_squared_loss = flow_loss.new_zeros(())
@@ -505,13 +513,26 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/chi_squared_loss_reg": 0.0,
                             "actor/chi_lratio_pos": 0.0,
                             "actor/chi_lratio_neg": 0.0,
+                            "actor/chi_pos_samples": 0.0,
+                "actor/chi_neg_samples": 0.0,
+                "actor/chi_pair_samples": 0.0,
+                "actor/chi_pair_margin": 0.0,
+                "actor/chi_pair_accuracy": 0.0,
+                "actor/chi_replay_pos_samples": 0.0,
+                "actor/chi_expert_pos_samples": 0.0,
+                "actor/chi_replay_neg_samples": 0.0,
+                "actor/chi_replay_neg_2_samples": 0.0,
                         }
 
-                    policy_loss = flow_loss + chi_squared_loss_coef * chi_squared_loss
+                    # Keep flow_loss in the graph even when its coefficient is
+                    # zero so FlowRL-only parameters stay in the optimizer's
+                    # update set and FSDP/Adam tensor grouping remains stable.
+                    policy_loss = chi_squared_loss_coef * chi_squared_loss + flow_loss * flow_loss_coef
 
                     flow_metrics.update(chi_metrics)
                     flow_metrics.update(
                         {
+                            "actor/flow_loss_coef": flow_loss_coef,
                             "actor/chi_squared_loss_coef": chi_squared_loss_coef,
                             "actor/final_loss": policy_loss.detach().item(),
                         }
@@ -569,91 +590,151 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.zero_grad()
         return metrics
 
-    def _compute_current_flow_reward(
+    def _compute_chi_log_ratio_group(
         self,
-        logpf: torch.Tensor,
-        logf_ref: torch.Tensor,
-        response_mask: torch.Tensor,
-        sample_data: dict,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        chi_squared_beta = float(self.config.get("chi_squared_beta", 0.001))
-        flow_reward_clip_min = self.config.get("flow_reward_clip_min", None)
+        data: dict,
+        prefix: str,
+        temperature: float,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        required_keys = (
+            f"{prefix}_input_ids",
+            f"{prefix}_attention_mask",
+            f"{prefix}_position_ids",
+            f"{prefix}_responses",
+            f"{prefix}_response_mask",
+            f"{prefix}_ref_log_prob",
+        )
+        if not all(key in data for key in required_keys):
+            return None
 
-        current_log_ratio = verl_F.masked_mean(logpf - logf_ref, response_mask, axis=1)
-
-        if "rule_reward" in sample_data:
-            rule_reward = sample_data["rule_reward"]
-        elif "token_level_rewards" in sample_data:
-            token_level_rewards = sample_data["token_level_rewards"]
-            if token_level_rewards.ndim == 1:
-                rule_reward = token_level_rewards
-            else:
-                rule_reward = verl_F.masked_sum(token_level_rewards, response_mask, axis=1)
-        else:
-            # Fall back to provided advantages if explicit rule reward is unavailable.
-            if sample_data["advantages"].ndim == 1:
-                rule_reward = sample_data["advantages"]
-            else:
-                rule_reward = verl_F.masked_mean(sample_data["advantages"], response_mask, axis=1)
-
-        rule_reward = rule_reward.to(device=current_log_ratio.device, dtype=current_log_ratio.dtype)
-        flow_reward = rule_reward + chi_squared_beta * current_log_ratio.detach()
-
-        if flow_reward_clip_min is not None:
-            flow_reward = torch.clamp_min(flow_reward, float(flow_reward_clip_min))
-
-        return flow_reward, current_log_ratio, rule_reward
+        micro_batch = {
+            "input_ids": data[f"{prefix}_input_ids"],
+            "attention_mask": data[f"{prefix}_attention_mask"],
+            "position_ids": data[f"{prefix}_position_ids"],
+            "responses": data[f"{prefix}_responses"],
+        }
+        _, log_prob = self._forward_micro_batch(
+            micro_batch=micro_batch,
+            temperature=temperature,
+            calculate_entropy=False,
+            return_log_z=False,
+        )
+        return (
+            log_prob,
+            data[f"{prefix}_ref_log_prob"],
+            data[f"{prefix}_response_mask"],
+        )
 
     def _compute_chi_squared_loss(
         self,
-        pos_logpf: torch.Tensor,
-        pos_logf_ref: torch.Tensor,
-        pos_response_mask: torch.Tensor,
-        neg_logpf: torch.Tensor,
-        neg_logf_ref: torch.Tensor,
-        neg_response_mask: torch.Tensor,
+        positive_groups: list[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        negative_groups: list[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     ) -> Tuple[torch.Tensor, dict]:
-        # Match chi_squared_rm.py:
-        #   0.5 * (beta * log(pi/pi_ref)(y+) - r_max)^2
-        # + 0.5 * (beta * log(pi/pi_ref)(y-) - r_min)^2
-        # + reg_coef * ((beta * log(pi/pi_ref)(y+))^2 + (beta * log(pi/pi_ref)(y-))^2)
-        chi_squared_beta = float(self.config.get("chi_squared_beta", 0.001))
-        chi_squared_reg_coef = float(self.config.get("chi_squared_reg_coef", 0.005))
-        chi_squared_r_max = float(self.config.get("chi_squared_r_max", 1.0))
-        chi_squared_r_min = float(self.config.get("chi_squared_r_min", -1.0))
+        def _group_log_ratios(
+            groups: list[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+        ) -> list[torch.Tensor]:
+            lr_groups = []
+            for logpf, logf_ref, response_mask in groups:
+                response_mask = response_mask.to(device=logpf.device, dtype=logpf.dtype)
+                logf_ref = logf_ref.to(device=logpf.device, dtype=logpf.dtype)
+                lr_groups.append(verl_F.masked_mean(logpf - logf_ref, response_mask, axis=1))
+            return lr_groups
 
-        pos_response_mask = pos_response_mask.to(device=pos_logpf.device, dtype=pos_logpf.dtype)
-        neg_response_mask = neg_response_mask.to(device=neg_logpf.device, dtype=neg_logpf.dtype)
-        pos_logf_ref = pos_logf_ref.to(device=pos_logpf.device, dtype=pos_logpf.dtype)
-        neg_logf_ref = neg_logf_ref.to(device=neg_logpf.device, dtype=neg_logpf.dtype)
+        lr_pos_groups = _group_log_ratios(positive_groups)
+        lr_neg_groups = _group_log_ratios(negative_groups)
+        margin_target = float(self.config.get("chi_squared_margin_target", 1.0))
+        if not lr_pos_groups or not lr_neg_groups:
+            zero = torch.zeros(
+                (),
+                device=next(self.actor_module.parameters()).device,
+                dtype=torch.float32,
+            )
+            chi_metrics = {
+                "actor/chi_squared_loss": 0.0,
+                "actor/chi_squared_loss_pos": 0.0,
+                "actor/chi_squared_loss_neg": 0.0,
+                "actor/chi_squared_loss_reg": 0.0,
+                "actor/chi_squared_beta": 1.0,
+                "actor/chi_squared_reg_coef": 0.0,
+                "actor/chi_squared_r_max": 1.0,
+                "actor/chi_squared_r_min": 0.0,
+                "actor/chi_lratio_pos": 0.0,
+                "actor/chi_lratio_neg": 0.0,
+                "actor/chi_pos_samples": 0.0,
+                "actor/chi_neg_samples": 0.0,
+                "actor/chi_pair_samples": 0.0,
+                "actor/chi_pair_margin": 0.0,
+                "actor/chi_pair_accuracy": 0.0,
+                "actor/chi_pair_margin_target": margin_target,
+                "actor/chi_length_normalized": 1.0,
+            }
+            return zero, chi_metrics
 
-        logp_pi_pos = verl_F.masked_sum(pos_logpf, pos_response_mask, axis=1)
-        logp_ref_pos = verl_F.masked_sum(pos_logf_ref, pos_response_mask, axis=1)
-        logp_pi_neg = verl_F.masked_sum(neg_logpf, neg_response_mask, axis=1)
-        logp_ref_neg = verl_F.masked_sum(neg_logf_ref, neg_response_mask, axis=1)
+        pair_losses = []
+        pair_margins = []
+        pair_lr_pos = []
+        pair_lr_neg = []
+        for lr_pos in lr_pos_groups:
+            for lr_neg in lr_neg_groups:
+                pair_count = min(lr_pos.size(0), lr_neg.size(0))
+                if pair_count <= 0:
+                    continue
+                lr_pos_pair = lr_pos[:pair_count]
+                lr_neg_pair = lr_neg[:pair_count].to(device=lr_pos.device, dtype=lr_pos.dtype)
+                margin = lr_pos_pair - lr_neg_pair
+                pair_losses.append((margin - margin_target).pow(2))
+                pair_margins.append(margin.detach())
+                pair_lr_pos.append(lr_pos_pair.detach())
+                pair_lr_neg.append(lr_neg_pair.detach())
 
-        lr_pos = logp_pi_pos - logp_ref_pos
-        lr_neg = logp_pi_neg - logp_ref_neg
+        if not pair_losses:
+            zero = lr_pos_groups[0].new_zeros(())
+            chi_metrics = {
+                "actor/chi_squared_loss": 0.0,
+                "actor/chi_squared_loss_pos": 0.0,
+                "actor/chi_squared_loss_neg": 0.0,
+                "actor/chi_squared_loss_reg": 0.0,
+                "actor/chi_squared_beta": 1.0,
+                "actor/chi_squared_reg_coef": 0.0,
+                "actor/chi_squared_r_max": 1.0,
+                "actor/chi_squared_r_min": 0.0,
+                "actor/chi_lratio_pos": 0.0,
+                "actor/chi_lratio_neg": 0.0,
+                "actor/chi_pos_samples": 0.0,
+                "actor/chi_neg_samples": 0.0,
+                "actor/chi_pair_samples": 0.0,
+                "actor/chi_pair_margin": 0.0,
+                "actor/chi_pair_accuracy": 0.0,
+                "actor/chi_pair_margin_target": margin_target,
+                "actor/chi_length_normalized": 1.0,
+            }
+            return zero, chi_metrics
 
-        pred_pos = chi_squared_beta * lr_pos
-        pred_neg = chi_squared_beta * lr_neg
-
-        loss_pos = 0.5 * (pred_pos - chi_squared_r_max).pow(2)
-        loss_neg = 0.5 * (pred_neg - chi_squared_r_min).pow(2)
-        loss_reg = chi_squared_reg_coef * (pred_pos.pow(2) + pred_neg.pow(2))
-        chi_squared_loss = (loss_pos + loss_neg + loss_reg).mean()
+        pair_loss = torch.cat(pair_losses, dim=0)
+        chi_squared_loss = pair_loss.mean()
+        loss_reg = chi_squared_loss.new_zeros(())
+        lr_pos_all = torch.cat(pair_lr_pos, dim=0)
+        lr_neg_all = torch.cat(pair_lr_neg, dim=0)
+        margins_all = torch.cat(pair_margins, dim=0)
 
         chi_metrics = {
             "actor/chi_squared_loss": chi_squared_loss.detach().item(),
-            "actor/chi_squared_loss_pos": loss_pos.mean().detach().item(),
-            "actor/chi_squared_loss_neg": loss_neg.mean().detach().item(),
-            "actor/chi_squared_loss_reg": loss_reg.mean().detach().item(),
-            "actor/chi_squared_beta": chi_squared_beta,
-            "actor/chi_squared_reg_coef": chi_squared_reg_coef,
-            "actor/chi_squared_r_max": chi_squared_r_max,
-            "actor/chi_squared_r_min": chi_squared_r_min,
-            "actor/chi_lratio_pos": lr_pos.detach().mean().item(),
-            "actor/chi_lratio_neg": lr_neg.detach().mean().item(),
+            "actor/chi_squared_loss_pos": chi_squared_loss.detach().item(),
+            "actor/chi_squared_loss_neg": 0.0,
+            "actor/chi_squared_loss_reg": loss_reg.detach().item(),
+            "actor/chi_squared_beta": 1.0,
+            "actor/chi_squared_reg_coef": 0.0,
+            "actor/chi_squared_r_max": 1.0,
+            "actor/chi_squared_r_min": 0.0,
+            "actor/chi_lratio_pos": lr_pos_all.mean().item(),
+            "actor/chi_lratio_neg": lr_neg_all.mean().item(),
+            "actor/chi_pos_samples": float(lr_pos_all.numel()),
+            "actor/chi_neg_samples": float(lr_neg_all.numel()),
+            "actor/chi_pair_samples": float(pair_loss.numel()),
+            "actor/chi_pair_margin": margins_all.mean().item(),
+            "actor/chi_pair_accuracy": (margins_all > 0.0).to(torch.float32).mean().item(),
+            "actor/chi_pair_margin_target": margin_target,
+            "actor/chi_length_normalized": 1.0,
         }
         return chi_squared_loss, chi_metrics
 

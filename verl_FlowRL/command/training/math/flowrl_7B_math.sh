@@ -111,7 +111,7 @@ fi
 #
 #   bash flowrl_7B_math.sh restart-qwen3-1p7b-rule
 # This performs a clean Ray restart and relaunches with:
-#   Qwen/Qwen3-1.7B-Base + full rule-based reward (train + eval) on all visible GPUs.
+#   Local checkpoint model + full rule-based reward (train + eval) on all visible GPUs.
 if [ "${1:-}" = "restart-2plus2" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
@@ -146,11 +146,11 @@ if [ "${1:-}" = "restart-2rollout-2reward" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
     exec env \
-        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+        PRETRAINED_MODEL=/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629 \
         MODEL_TAG=qwen3_1p7b \
         MODEL_SIZE_DIR=1.7B \
         RM_REFERENCE_MODEL=Qwen/Qwen3-1.7B-Base \
-        RM_TOKENIZER_PATH=Qwen/Qwen3-1.7B-Base \
+        RM_TOKENIZER_PATH=/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629 \
         RM_POLICY_MODEL=/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629 \
         REWARD_MODE=log_ratio_rm \
         CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -260,7 +260,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
     shift
     ray stop --force >/dev/null 2>&1 || true
     exec env \
-        PRETRAINED_MODEL=Qwen/Qwen3-1.7B-Base \
+        PRETRAINED_MODEL=/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629 \
         MODEL_TAG=qwen3_1p7b \
         MODEL_SIZE_DIR=1.7B \
         REWARD_MODE=rule \
@@ -273,7 +273,7 @@ if [ "${1:-}" = "restart-qwen3-1p7b-rule" ]; then
         bash "$0" "$@"
 fi
 
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-Qwen/Qwen3-1.7B-Base}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629}
 MODEL_TAG=${MODEL_TAG:-qwen3_1p7b}
 MODEL_SIZE_DIR=${MODEL_SIZE_DIR:-1.7B}
 REWARD_MODE=${REWARD_MODE:-rule}
@@ -470,7 +470,7 @@ fi
 
 # Log-ratio reward model settings (used when REWARD_MODE=log_ratio_rm)
 RM_POLICY_MODEL=${RM_POLICY_MODEL:-$PRETRAINED_MODEL}
-RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-$PRETRAINED_MODEL}
+RM_REFERENCE_MODEL=${RM_REFERENCE_MODEL:-Qwen/Qwen3-1.7B-Base}
 RM_TOKENIZER_PATH=${RM_TOKENIZER_PATH:-$PRETRAINED_MODEL}
 RM_BETA=${RM_BETA:-0.2} # 0.001
 RM_REPEAT_PENALTY_WEIGHT=${RM_REPEAT_PENALTY_WEIGHT:-0.01}
@@ -478,6 +478,12 @@ RM_REPEAT_PENALTY_NGRAM_SIZE=${RM_REPEAT_PENALTY_NGRAM_SIZE:-10}
 RM_REPEAT_PENALTY_CLIP_MIN=${RM_REPEAT_PENALTY_CLIP_MIN:--1.0}
 RM_LOG_RATIO_REWARD_CLIP_MIN=${RM_LOG_RATIO_REWARD_CLIP_MIN:--1.0}
 RM_REWARD_CLIP_MIN=${RM_REWARD_CLIP_MIN:-null}
+RM_LOG_RATIO_LAMBDA_PEAK_STEP=${RM_LOG_RATIO_LAMBDA_PEAK_STEP:-50}
+RM_LOG_RATIO_LAMBDA_PEAK_VALUE=${RM_LOG_RATIO_LAMBDA_PEAK_VALUE:-0.5}
+RM_LOG_RATIO_LAMBDA_DECAY_END_STEP=${RM_LOG_RATIO_LAMBDA_DECAY_END_STEP:-null}
+RM_LOG_RATIO_WARMUP_STEPS=${RM_LOG_RATIO_WARMUP_STEPS:-30}
+# Actor-side FlowRL loss is always active; keep reward warmup separate.
+FLOWRL_LOG_RATIO_WARMUP_STEPS=${FLOWRL_LOG_RATIO_WARMUP_STEPS:-0}
 RM_MICRO_BSZ=${RM_MICRO_BSZ:-1}
 _rm_device_map_user_set=0
 if [ -n "${RM_DEVICE_MAP+x}" ]; then
@@ -513,13 +519,24 @@ RM_ONLINE_TRAIN_SKIP_WARMUP=${RM_ONLINE_TRAIN_SKIP_WARMUP:-0}
 RM_ONLINE_TRAIN_USE_DATAPARALLEL=${RM_ONLINE_TRAIN_USE_DATAPARALLEL:-0}
 RM_ONLINE_TRAIN_SINGLE_WORKER=${RM_ONLINE_TRAIN_SINGLE_WORKER:-1}
 USE_ROLLOUT_LOGPROB_REWARD=${USE_ROLLOUT_LOGPROB_REWARD:-1}
-# Joint actor objective knobs: L = Flow_Loss + chi_squared_loss.
-POLICY_CHI_LOSS_COEF=${POLICY_CHI_LOSS_COEF:-500}
+# Joint actor objective knobs:
+# L = POLICY_FLOW_LOSS_COEF * Flow_Loss + POLICY_CHI_LOSS_COEF * chi_squared_loss.
+POLICY_FLOW_LOSS_COEF=${POLICY_FLOW_LOSS_COEF:-1.0}
+POLICY_CHI_LOSS_COEF=${POLICY_CHI_LOSS_COEF:-0.05}
+POLICY_CHI_MARGIN_TARGET=${POLICY_CHI_MARGIN_TARGET:-1.0}
 POLICY_CHI_BETA=${POLICY_CHI_BETA:-$RM_ONLINE_TRAIN_BETA}
 POLICY_CHI_REG_COEF=${POLICY_CHI_REG_COEF:-0.005}
 POLICY_CHI_R_MAX=${POLICY_CHI_R_MAX:-1.0}
 POLICY_CHI_R_MIN=${POLICY_CHI_R_MIN:--1.0}
 POLICY_CHI_POSITIVE_JSONL=${POLICY_CHI_POSITIVE_JSONL:-$RM_ONLINE_TRAIN_POSITIVE_JSONL}
+POLICY_CHI_REPLAY_BUFFER_SIZE=${POLICY_CHI_REPLAY_BUFFER_SIZE:-81920}
+# Offline chi test mode: use expert positives plus expert negatives only.
+POLICY_CHI_TEST_MODE=${POLICY_CHI_TEST_MODE:-0}
+if [ "$POLICY_CHI_TEST_MODE" = "1" ]; then
+    POLICY_CHI_TEST_MODE_BOOL=True
+else
+    POLICY_CHI_TEST_MODE_BOOL=False
+fi
 RM_FORCE_CPU=${RM_FORCE_CPU:-0}
 if [ "$RM_FORCE_CPU" = "1" ]; then
     RM_DEVICE_MAP=cpu
@@ -657,6 +674,10 @@ case "$REWARD_MODE" in
       reward_overrides=(
         reward_model.reward_manager=batch
         +reward_model.use_rollout_logprob_reward=True
+        +reward_model.log_ratio_lambda_peak_step=$RM_LOG_RATIO_LAMBDA_PEAK_STEP
+        +reward_model.log_ratio_lambda_peak_value=$RM_LOG_RATIO_LAMBDA_PEAK_VALUE
+        +reward_model.log_ratio_lambda_decay_end_step=$RM_LOG_RATIO_LAMBDA_DECAY_END_STEP
+        +reward_model.log_ratio_reward_warmup_steps=$RM_LOG_RATIO_WARMUP_STEPS
         reward_model.launch_reward_fn_async=False
         custom_reward_function.path=null
         custom_reward_function.name=compute_score
@@ -675,6 +696,10 @@ case "$REWARD_MODE" in
         custom_reward_function.reward_kwargs.repeat_penalty_clip_min=$RM_REPEAT_PENALTY_CLIP_MIN
         custom_reward_function.reward_kwargs.log_ratio_reward_clip_min=$RM_LOG_RATIO_REWARD_CLIP_MIN
         custom_reward_function.reward_kwargs.reward_clip_min=$RM_REWARD_CLIP_MIN
+        custom_reward_function.reward_kwargs.log_ratio_lambda_peak_step=$RM_LOG_RATIO_LAMBDA_PEAK_STEP
+        custom_reward_function.reward_kwargs.log_ratio_lambda_peak_value=$RM_LOG_RATIO_LAMBDA_PEAK_VALUE
+        custom_reward_function.reward_kwargs.log_ratio_lambda_decay_end_step=$RM_LOG_RATIO_LAMBDA_DECAY_END_STEP
+        custom_reward_function.reward_kwargs.log_ratio_reward_warmup_steps=$RM_LOG_RATIO_WARMUP_STEPS
         custom_reward_function.reward_kwargs.micro_batch_size=$RM_MICRO_BSZ
         custom_reward_function.reward_kwargs.device_map=$RM_DEVICE_MAP
         custom_reward_function.reward_kwargs.torch_dtype=$RM_TORCH_DTYPE
@@ -862,6 +887,8 @@ echo "[INFO] EVAL_FILES=$r1_test_path"
 echo "[INFO] LOGGER_MODE=$LOGGER_MODE WANDB_MODE=$WANDB_MODE VERL_WANDB_INIT_TIMEOUT=$VERL_WANDB_INIT_TIMEOUT"
 echo "[INFO] FSDP_PARAM_DTYPE=$FSDP_PARAM_DTYPE ROLLOUT_DTYPE=$ROLLOUT_DTYPE RM_TORCH_DTYPE=$RM_TORCH_DTYPE RM_ATTN_IMPLEMENTATION=$RM_ATTN_IMPLEMENTATION"
 echo "[INFO] ACTOR_PPO_MINI_BATCH_SIZE=$actor_ppo_mini_batch_size RM_BETA_INFER=$RM_BETA RM_ONLINE_TRAIN=$RM_ONLINE_TRAIN RM_TRAIN_BETA=$RM_ONLINE_TRAIN_BETA RM_TRAIN_LENGTH_NORMALIZE=$RM_ONLINE_TRAIN_LENGTH_NORMALIZE RM_TRAIN_PROMPT_MAX_LENGTH=$RM_ONLINE_TRAIN_PROMPT_MAX_LENGTH RM_UPDATES_PER_BATCH=$RM_ONLINE_TRAIN_UPDATES_PER_BATCH RM_ROLLOUT_MINIBATCH_SIZE=$RM_ONLINE_TRAIN_ROLLOUT_MINIBATCH_SIZE RM_SKIP_WARMUP=$RM_ONLINE_TRAIN_SKIP_WARMUP RM_USE_DATAPARALLEL=$RM_ONLINE_TRAIN_USE_DATAPARALLEL"
+echo "[INFO] RM_LOG_RATIO_WARMUP_STEPS=$RM_LOG_RATIO_WARMUP_STEPS FLOWRL_LOG_RATIO_WARMUP_STEPS=$FLOWRL_LOG_RATIO_WARMUP_STEPS"
+echo "[INFO] POLICY_FLOW_LOSS_COEF=$POLICY_FLOW_LOSS_COEF POLICY_CHI_LOSS_COEF=$POLICY_CHI_LOSS_COEF POLICY_CHI_MARGIN_TARGET=$POLICY_CHI_MARGIN_TARGET POLICY_CHI_TEST_MODE=$POLICY_CHI_TEST_MODE POLICY_CHI_POSITIVE_JSONL=$POLICY_CHI_POSITIVE_JSONL POLICY_CHI_REPLAY_BUFFER_SIZE=$POLICY_CHI_REPLAY_BUFFER_SIZE"
 echo "[INFO] REWARD_ASYNC_WORKERS=$reward_async_num_workers REWARD_ASYNC_GPUS_PER_WORKER=$reward_async_num_gpus_per_worker"
 echo "[INFO] USE_FUSED_KERNELS=$USE_FUSED_KERNELS (model.use_fused_kernels=$MODEL_USE_FUSED_KERNELS)"
 echo "[INFO] NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE NCCL_IB_DISABLE=$NCCL_IB_DISABLE NCCL_NVLS_ENABLE=$NCCL_NVLS_ENABLE NCCL_CUMEM_ENABLE=$NCCL_CUMEM_ENABLE"
@@ -921,12 +948,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.flow_loss_coef=$POLICY_FLOW_LOSS_COEF \
     actor_rollout_ref.actor.chi_squared_loss_coef=$POLICY_CHI_LOSS_COEF \
+    +actor_rollout_ref.actor.chi_squared_margin_target=$POLICY_CHI_MARGIN_TARGET \
     actor_rollout_ref.actor.chi_squared_beta=$POLICY_CHI_BETA \
     actor_rollout_ref.actor.chi_squared_reg_coef=$POLICY_CHI_REG_COEF \
     actor_rollout_ref.actor.chi_squared_r_max=$POLICY_CHI_R_MAX \
     actor_rollout_ref.actor.chi_squared_r_min=$POLICY_CHI_R_MIN \
     actor_rollout_ref.actor.chi_squared_positive_jsonl=$POLICY_CHI_POSITIVE_JSONL \
+    actor_rollout_ref.actor.chi_squared_replay_buffer_size=$POLICY_CHI_REPLAY_BUFFER_SIZE \
+    actor_rollout_ref.actor.chi_squared_test_mode=$POLICY_CHI_TEST_MODE_BOOL \
+    actor_rollout_ref.actor.flowrl_log_ratio_warmup_steps=$FLOWRL_LOG_RATIO_WARMUP_STEPS \
     actor_rollout_ref.actor.detach_reward_for_flow_loss=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=$actor_param_offload \

@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:nvidia_rtx_pro_6000_blackwell_max-q_workstation_edition:4
 #SBATCH --time=10-00:00:00
-#SBATCH --mem=64G
+#SBATCH --mem=256G
 #SBATCH --output=/proj/weitongzlab/projects/reasoning-distillation-flowrl/verl_FlowRL/command/training/math/slurm-%j.out
 #SBATCH --error=/proj/weitongzlab/projects/reasoning-distillation-flowrl/verl_FlowRL/command/training/math/slurm-%j.err
 
@@ -17,7 +17,8 @@ PROJECT_ROOT="/proj/weitongzlab/projects/reasoning-distillation-flowrl"
 FLOWRL_ROOT="${PROJECT_ROOT}/verl_FlowRL"
 TRAIN_SCRIPT="${FLOWRL_ROOT}/command/training/math/flowrl_7B_math.sh"
 BASE_POLICY_MODEL="Qwen/Qwen3-1.7B-Base"
-REWARD_MODEL="/proj/weitongzlab/projects/rm_training/rm_out/checkpoint-1629"
+BASE_REFERENCE_MODEL="Qwen/Qwen3-1.7B-Base"
+REWARD_MODEL="Qwen/Qwen3-1.7B-Base"
 ALIGNED_MATH_TRAIN_PATH="${PROJECT_ROOT}/data/math_data/dapo-math-17k.prompt_aligned_with_dapo17k_rm.parquet"
 BASE_MATH_TRAIN_PATH="${PROJECT_ROOT}/data/math_data/dapo-math-17k.parquet"
 
@@ -39,13 +40,24 @@ export REWARD_ASYNC_NUM_CPUS="${REWARD_ASYNC_NUM_CPUS:-2}"
 export USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-0}"
 
 export PRETRAINED_MODEL="${BASE_POLICY_MODEL}"
-export RM_REFERENCE_MODEL="${BASE_POLICY_MODEL}"
+export RM_REFERENCE_MODEL="${BASE_REFERENCE_MODEL}"
 export RM_TOKENIZER_PATH="${BASE_POLICY_MODEL}"
 export RM_POLICY_MODEL="${REWARD_MODEL}"
 export MODEL_TAG="qwen3_1p7b"
 export MODEL_SIZE_DIR="1.7B"
 export REWARD_MODE="${REWARD_MODE:-log_ratio_rm}"
+# Default to a fresh run because FSDP sharded checkpoint resume is currently
+# failing on this cluster with NCCL allgather_into_tensor_coalesced.
+# Override with RESUME_MODE=auto or RESUME_MODE=resume_path if you explicitly
+# want to restore from a checkpoint.
+export RESUME_MODE="${RESUME_MODE:-disable}"
 export OPTION1_SPLIT_MODE="${OPTION1_SPLIT_MODE:-0}"
+export RM_LOG_RATIO_LAMBDA_PEAK_STEP="${RM_LOG_RATIO_LAMBDA_PEAK_STEP:-50}"
+export RM_LOG_RATIO_LAMBDA_PEAK_VALUE="${RM_LOG_RATIO_LAMBDA_PEAK_VALUE:-0.5}"
+export RM_LOG_RATIO_LAMBDA_DECAY_END_STEP="${RM_LOG_RATIO_LAMBDA_DECAY_END_STEP:-null}"
+export RM_LOG_RATIO_WARMUP_STEPS="${RM_LOG_RATIO_WARMUP_STEPS:-30}"
+export FLOWRL_LOG_RATIO_WARMUP_STEPS="${FLOWRL_LOG_RATIO_WARMUP_STEPS:-0}"
+export POLICY_CHI_TEST_MODE="${POLICY_CHI_TEST_MODE:-0}"
 
 # Force aligned training parquet for chi-squared positive-pool prompt matching.
 export FLOWRL_MATH_TRAIN_PATH="${FLOWRL_MATH_TRAIN_PATH:-${ALIGNED_MATH_TRAIN_PATH}}"

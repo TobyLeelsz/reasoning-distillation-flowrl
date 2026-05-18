@@ -35,6 +35,8 @@ PROMPT_TOKEN_IDS_KEY = "__verl_prompt_token_ids"
 RESPONSE_TOKEN_IDS_KEY = "__verl_response_token_ids"
 PROMPT_TEXT_KEY = "__verl_prompt_text"
 RESPONSE_TEXT_KEY = "__verl_response_text"
+REWARD_GLOBAL_STEP_KEY = "__reward_global_step"
+REWARD_TOTAL_TRAINING_STEPS_KEY = "__reward_total_training_steps"
 
 _SCORER = None
 _SCORER_CFG = None
@@ -241,6 +243,10 @@ class LogRatioRewardScorer:
         repeat_penalty_clip_min: Optional[float],
         log_ratio_reward_clip_min: Optional[float],
         reward_clip_min: Optional[float],
+        log_ratio_lambda_peak_step: int,
+        log_ratio_lambda_peak_value: float,
+        log_ratio_lambda_decay_end_step: Optional[int],
+        log_ratio_reward_warmup_steps: int,
         online_train_with_rollout: bool,
         online_train_positive_jsonl: Optional[str],
         online_train_beta: float,
@@ -282,6 +288,17 @@ class LogRatioRewardScorer:
             float(log_ratio_reward_clip_min) if log_ratio_reward_clip_min is not None else None
         )
         self.reward_clip_min = float(reward_clip_min) if reward_clip_min is not None else None
+        self.log_ratio_lambda_peak_step = max(1, int(log_ratio_lambda_peak_step))
+        self.log_ratio_lambda_peak_value = max(0.0, float(log_ratio_lambda_peak_value))
+        if log_ratio_lambda_decay_end_step in {None, "", "null", "None"}:
+            self.log_ratio_lambda_decay_end_step = None
+        else:
+            self.log_ratio_lambda_decay_end_step = int(log_ratio_lambda_decay_end_step)
+        try:
+            parsed_log_ratio_reward_warmup_steps = int(log_ratio_reward_warmup_steps)
+        except (TypeError, ValueError):
+            parsed_log_ratio_reward_warmup_steps = 0
+        self.log_ratio_reward_warmup_steps = max(0, parsed_log_ratio_reward_warmup_steps)
 
         # Online RM training knobs (separate from inference knobs above).
         self.online_train_with_rollout = _to_bool(online_train_with_rollout)
@@ -436,6 +453,10 @@ class LogRatioRewardScorer:
             f"micro_batch_size={self.micro_batch_size}, max_seq_len={self.max_seq_len}, "
             f"log_ratio_reward_clip_min={self.log_ratio_reward_clip_min}, "
             f"reward_clip_min={self.reward_clip_min}, "
+            f"log_ratio_lambda_peak_step={self.log_ratio_lambda_peak_step}, "
+            f"log_ratio_lambda_peak_value={self.log_ratio_lambda_peak_value}, "
+            f"log_ratio_lambda_decay_end_step={self.log_ratio_lambda_decay_end_step}, "
+            f"log_ratio_reward_warmup_steps={self.log_ratio_reward_warmup_steps}, "
             f"online_train_enabled={self._online_train_enabled}, "
             f"online_train_beta={self.online_train_beta}, "
             f"online_train_length_normalize={int(self.online_train_length_normalize)}, "
@@ -1632,6 +1653,26 @@ class LogRatioRewardScorer:
         _vprint("finished logprob pass")
         return torch.cat(all_logps, dim=0)
 
+    @staticmethod
+    def _extract_reward_global_step(extra_info) -> Optional[int]:
+        if not isinstance(extra_info, dict):
+            return None
+        raw_step = extra_info.get(REWARD_GLOBAL_STEP_KEY, None)
+        try:
+            return int(raw_step)
+        except (TypeError, ValueError):
+            return None
+
+    def _compute_log_ratio_lambda(self, rule_reward: float, reward_global_step: Optional[int] = None) -> float:
+        """Enable log-ratio reward only when rule reward is +1."""
+        if (
+            self.log_ratio_reward_warmup_steps > 0
+            and reward_global_step is not None
+            and int(reward_global_step) <= self.log_ratio_reward_warmup_steps
+        ):
+            return 0.0
+        return 1.0 if float(rule_reward) == 1.0 else 0.0
+
     def score_batch(self, data_sources, solution_strs, ground_truths, extra_infos=None):
         solution_strs = list(solution_strs)
         data_sources = list(data_sources)
@@ -1693,9 +1734,10 @@ class LogRatioRewardScorer:
 
             # Strict binary log-ratio reward.
             log_ratio_reward = 1.0 if log_ratio_reward > 0.0 else -1.0
+            reward_global_step = self._extract_reward_global_step(extra_info=extra_info)
+            log_ratio_lambda = 0.0
 
-            # Direct composition as requested.
-            raw_reward_val = rule_reward + log_ratio_reward
+            raw_reward_val = rule_reward
 
             reward_val = raw_reward_val
             if not math.isfinite(reward_val):
@@ -1709,7 +1751,9 @@ class LogRatioRewardScorer:
                     "pi_ref_logp": float(r_logp.item()),
                     "response_token_len": int(resp_len.item()),
                     "log_ratio_reward": log_ratio_reward,
+                    "log_ratio_lambda": log_ratio_lambda,
                     "log_ratio_reward_clip_min": self.log_ratio_reward_clip_min,
+                    "reward_global_step": reward_global_step,
                     "rule_reward": rule_reward,
                     "rule_reward_gate": None,
                     "raw_score_before_clip": raw_reward_val,
@@ -1780,6 +1824,10 @@ def compute_score(
     repeat_penalty_clip_min=None,
     log_ratio_reward_clip_min=None,
     reward_clip_min=None,
+    log_ratio_lambda_peak_step=50,
+    log_ratio_lambda_peak_value=0.5,
+    log_ratio_lambda_decay_end_step=None,
+    log_ratio_reward_warmup_steps=0,
     online_train_with_rollout=False,
     online_train_positive_jsonl=None,
     online_train_beta=_DEFAULT_RM_TRAIN_BETA,
@@ -1827,6 +1875,10 @@ def compute_score(
         repeat_penalty_clip_min=repeat_penalty_clip_min,
         log_ratio_reward_clip_min=log_ratio_reward_clip_min,
         reward_clip_min=reward_clip_min,
+        log_ratio_lambda_peak_step=log_ratio_lambda_peak_step,
+        log_ratio_lambda_peak_value=log_ratio_lambda_peak_value,
+        log_ratio_lambda_decay_end_step=log_ratio_lambda_decay_end_step,
+        log_ratio_reward_warmup_steps=log_ratio_reward_warmup_steps,
         online_train_with_rollout=online_train_with_rollout,
         online_train_positive_jsonl=online_train_positive_jsonl,
         online_train_beta=online_train_beta,
